@@ -9,6 +9,7 @@ Control your Mitsubishi Electric climate control systems through the Kumo Cloud 
 - Multi-zone support
 - Automatic authentication handling
 - Device capability detection
+- Auto Heat/Cool boundary mode support
 
 ## Setup
 

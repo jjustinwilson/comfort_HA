@@ -27,6 +27,8 @@ from .const import (
     OPERATION_MODE_DRY,
     OPERATION_MODE_VENT,
     OPERATION_MODE_AUTO,
+    OPERATION_MODE_AUTO_COOL,
+    OPERATION_MODE_AUTO_HEAT,
     FAN_SPEED_AUTO,
     FAN_SPEED_LOW,
     FAN_SPEED_MEDIUM,
@@ -46,10 +48,19 @@ KUMO_TO_HVAC_MODE = {
     OPERATION_MODE_DRY: HVACMode.DRY,
     OPERATION_MODE_VENT: HVACMode.FAN_ONLY,
     OPERATION_MODE_AUTO: HVACMode.HEAT_COOL,
+    OPERATION_MODE_AUTO_COOL: HVACMode.HEAT_COOL,
+    OPERATION_MODE_AUTO_HEAT: HVACMode.HEAT_COOL,
 }
 
 # Reverse mapping
-HVAC_TO_KUMO_MODE = {v: k for k, v in KUMO_TO_HVAC_MODE.items()}
+HVAC_TO_KUMO_MODE = {
+    HVACMode.OFF: OPERATION_MODE_OFF,
+    HVACMode.COOL: OPERATION_MODE_COOL,
+    HVACMode.HEAT: OPERATION_MODE_HEAT,
+    HVACMode.DRY: OPERATION_MODE_DRY,
+    HVACMode.FAN_ONLY: OPERATION_MODE_VENT,
+    HVACMode.HEAT_COOL: OPERATION_MODE_AUTO,
+}
 
 # Fan speed mappings
 KUMO_FAN_SPEEDS = [FAN_SPEED_AUTO, FAN_SPEED_LOW, FAN_SPEED_MEDIUM, FAN_SPEED_HIGH]
@@ -240,7 +251,11 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
             return HVACAction.DRYING
         elif operation_mode == OPERATION_MODE_VENT:
             return HVACAction.FAN
-        elif operation_mode == OPERATION_MODE_AUTO:
+        elif operation_mode in (
+            OPERATION_MODE_AUTO,
+            OPERATION_MODE_AUTO_COOL,
+            OPERATION_MODE_AUTO_HEAT,
+        ):
             # For auto mode, determine action based on current vs target temperature
             current_temp = self.current_temperature
             target_temp = self.target_temperature
