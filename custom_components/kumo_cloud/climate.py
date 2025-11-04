@@ -360,6 +360,16 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         """Return the supported step of target temperature."""
         return 0.5  # Kumo Cloud typically supports 0.5 degree steps
 
+    def _snap_temperature(self, temp: float | None) -> float | None:
+        """Snap temperature to nearest 0.5°C increment.
+
+        This ensures temperatures are always on the API's valid grid,
+        preventing discrepancies when HA is configured to display in Fahrenheit.
+        """
+        if temp is None:
+            return None
+        return round(temp * 2) / 2
+
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
@@ -402,6 +412,9 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         if target_temp is None:
             return
 
+        # Snap to 0.5°C increments for API compatibility
+        target_temp = self._snap_temperature(target_temp)
+
         hvac_mode = self.hvac_mode
         commands = {}
 
@@ -420,7 +433,7 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         elif hvac_mode == HVACMode.HEAT_COOL:
             # For auto mode, set both setpoints based on current temperature
             commands["spCool"] = target_temp
-            commands["spHeat"] = target_temp - 2  # 2 degree hysteresis
+            commands["spHeat"] = self._snap_temperature(target_temp - 2)  # 2 degree hysteresis
 
         if commands:
             await self._send_command_and_refresh(commands)
