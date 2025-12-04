@@ -1,5 +1,5 @@
 {
-  "name": "Mitsubishi Comfort",
+  "name": "Mitsubishi Comfort - jgoulah test",
   "hacs": "1.6.0",
   "domains": ["climate"],
   "iot_class": "Cloud Polling",
