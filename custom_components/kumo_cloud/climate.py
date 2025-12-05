@@ -473,14 +473,30 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         if commands:
             await self._send_command_and_refresh(commands)
 
+    async def async_handle_set_fan_mode_service(self, fan_mode: str) -> None:
+        """Handle fan mode service call with case-insensitive validation."""
+        # Normalize to lowercase for validation
+        fan_mode_lower = fan_mode.lower()
+        if fan_mode_lower not in UI_FAN_ORDER:
+            raise ValueError(f"Invalid fan mode: {fan_mode}")
+        await self.async_set_fan_mode(fan_mode_lower)
+
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode (accept Mitsubishi label)."""
-        api_value = UI_TO_API_FAN.get(fan_mode, fan_mode)
+        api_value = UI_TO_API_FAN.get(fan_mode.lower(), fan_mode)
         await self._send_command_and_refresh({"fanSpeed": api_value})
+
+    async def async_handle_set_swing_mode_service(self, swing_mode: str) -> None:
+        """Handle swing mode service call with case-insensitive validation."""
+        # Normalize to lowercase for validation
+        swing_mode_lower = swing_mode.lower()
+        if swing_mode_lower not in UI_VANE_ORDER:
+            raise ValueError(f"Invalid swing mode: {swing_mode}")
+        await self.async_set_swing_mode(swing_mode_lower)
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
         """Set vane position (accept Mitsubishi label)."""
-        api_value = UI_TO_API_VANE.get(swing_mode, swing_mode)
+        api_value = UI_TO_API_VANE.get(swing_mode.lower(), swing_mode)
         await self._send_command_and_refresh({"airDirection": api_value})
 
     async def async_turn_on(self) -> None:
