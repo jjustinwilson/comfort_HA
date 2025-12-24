@@ -148,6 +148,15 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             # Get fresh device details
             device_detail = await self.api.get_device_details(device_serial)
 
+            # Check if the device already exists and the updatedAt matches
+            if (
+                device_serial in self.devices
+                and "updatedAt" in self.devices[device_serial]
+                and self.devices[device_serial]["updatedAt"] == device_detail.get("updatedAt")
+            ):
+                _LOGGER.debug("Device %s data is already up-to-date", device_serial)
+                return  # Early out if no update is needed
+
             # Update the cached device data
             self.devices[device_serial] = device_detail
 
@@ -264,3 +273,10 @@ class KumoCloudDevice:
                 "Failed to send command to device %s: %s", self.device_serial, err
             )
             raise
+
+    def cache_command(self, commands: dict[str, Any]) -> None:
+        """Cache the given commands in self.device_data."""
+        device_data = self.device_data
+        for key, value in commands.items():
+            device_data[key] = value
+        _LOGGER.debug("Cached commands in device data: %s", commands)

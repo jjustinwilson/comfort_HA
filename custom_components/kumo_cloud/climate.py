@@ -349,9 +349,16 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
 
     async def _send_command_and_refresh(self, commands: dict[str, Any]) -> None:
         """Send command and ensure fresh status update."""
+        # Cache the command first
+        self.device.cache_command(commands)
+
+        # Trigger a state update for this entity to reflect cached changes
+        self.async_write_ha_state()
+
+        # Send the command and refresh the device
         await self.device.send_command(commands)
-        # The device.send_command method now handles refreshing the device status
-        # Also trigger a state update for this entity to reflect changes immediately
+
+        # Trigger another state update to reflect refreshed changes
         self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -448,4 +455,4 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
 
     async def async_turn_off(self) -> None:
         """Turn the entity off."""
-        await self._send_command_and_refresh({"operationMode": OPERATION_MODE_OFF})
+        await self._send_command_and_refresh({"operationMode": OPERATION_MODE_OFF"})
