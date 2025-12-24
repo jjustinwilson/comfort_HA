@@ -455,4 +455,4 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
 
     async def async_turn_off(self) -> None:
         """Turn the entity off."""
-        await self._send_command_and_refresh({"operationMode": OPERATION_MODE_OFF"})
+        await self._send_command_and_refresh({"operationMode": OPERATION_MODE_OFF})
