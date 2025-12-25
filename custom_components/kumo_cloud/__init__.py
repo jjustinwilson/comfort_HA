@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -91,6 +91,11 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
         self.devices: dict[str, dict[str, Any]] = {}
         self.device_profiles: dict[str, list[dict[str, Any]]] = {}
 
+        # Instance variable to store cached commands
+        # Keys: A tuple of (device_serial: str, command: str).
+        # Values: A tuple of (ISO 8601 UTC timestamp: str, command value: Any).
+        self.cached_commands: dict[tuple[str, str], tuple[str, Any]] = {}
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Kumo Cloud."""
         try:
@@ -152,10 +157,13 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             if (
                 device_serial in self.devices
                 and "updatedAt" in self.devices[device_serial]
-                and self.devices[device_serial]["updatedAt"] == device_detail.get("updatedAt")
             ):
-                _LOGGER.debug("Device %s data is already up-to-date", device_serial)
-                return  # Early out if no update is needed
+                self.cull_cached_commands(device_serial, device_detail.get("updatedAt"))
+
+            # Reapply cached commands to the device details
+            for (cached_device_serial, command), (_, command_value) in self.cached_commands.items():
+                if cached_device_serial == device_serial:
+                    device_detail[command] = command_value
 
             # Update the cached device data
             self.devices[device_serial] = device_detail
@@ -193,6 +201,36 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
 
         except Exception as err:
             _LOGGER.warning("Failed to refresh device %s: %s", device_serial, err)
+
+    def cache_command(self, device_serial: str, command: str, value: Any) -> None:
+        """Cache a command with its value and timestamp."""
+        current_time = datetime.now(timezone.utc).isoformat()
+        self.cached_commands[(device_serial, command)] = (current_time, value)
+        _LOGGER.debug("Cached command in device data: %s", command)
+
+    def cull_cached_commands(self, device_serial: str, date: str) -> None:
+        """Remove cached commands for a device where the date is on or after the item's timestamp."""
+        to_remove = []
+        input_date = datetime.fromisoformat(date)
+
+        for key, value in self.cached_commands.items():
+            cached_device_serial, command = key
+            cached_date, _ = value
+            cached_date_obj = datetime.fromisoformat(cached_date)
+
+            # Check if the device_serial matches and the input date is on or after the cached date
+            if cached_device_serial == device_serial and input_date >= cached_date_obj:
+                to_remove.append(key)
+
+        # Remove the matching keys
+        for key in to_remove:
+            del self.cached_commands[key]
+
+        # Log only if commands were culled
+        if to_remove:
+            _LOGGER.debug(
+                "Culled %d cached commands for device %s on or after %s", len(to_remove), device_serial, date
+            )
 
 
 class KumoCloudDevice:
@@ -274,9 +312,11 @@ class KumoCloudDevice:
             )
             raise
 
-    def cache_command(self, commands: dict[str, Any]) -> None:
-        """Cache the given commands in self.device_data."""
-        device_data = self.device_data
-        for key, value in commands.items():
-            device_data[key] = value
-        _LOGGER.debug("Cached commands in device data: %s", commands)
+    def cache_command(self, command: str, value: Any) -> None:
+        """Cache a command with its value and timestamp in the coordinator."""
+        self.coordinator.cache_command(self.device_serial, command, value)
+
+    def cache_commands(self, commands: dict[str, Any]) -> None:
+        """Cache multiple commands with their values and timestamps in the coordinator."""
+        for command, value in commands.items():
+            self.cache_command(command, value)
