@@ -401,7 +401,7 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
     async def _send_command_and_refresh(self, commands: dict[str, Any]) -> None:
         """Send command and ensure fresh status update."""
         # Cache the command first
-        self.device.cache_command(commands)
+        self.device.cache_commands(commands)
 
         # Trigger a state update for this entity to reflect cached changes
         self.async_write_ha_state()
