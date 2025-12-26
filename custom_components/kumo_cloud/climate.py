@@ -21,6 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.components.sensor import SensorEntity
 
 from . import KumoCloudDataUpdateCoordinator, KumoCloudDevice
 from .const import (
@@ -82,7 +83,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up Kumo Cloud climate devices."""
+    """Set up Kumo Cloud climate and sensor devices."""
     coordinator: KumoCloudDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
@@ -93,6 +94,8 @@ async def async_setup_entry(
 
             device = KumoCloudDevice(coordinator, zone_id, device_serial)
             entities.append(KumoCloudClimate(device))
+            entities.append(KumoCloudTemperatureSensor(device))
+            entities.append(KumoCloudHumiditySensor(device))
 
     async_add_entities(entities)
 
@@ -398,6 +401,20 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         """Return True if entity is available."""
         return self.device.available and self.coordinator.last_update_success
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the optional state attributes."""
+        attributes = super().extra_state_attributes or {}
+
+        # Add humidity to the attributes
+        adapter = self.device.zone_data.get("adapter", {})
+        device_data = self.device.device_data
+        humidity = device_data.get("humidity", adapter.get("humidity"))
+        if humidity is not None:
+            attributes["humidity"] = humidity
+
+        return attributes
+
     async def _send_command_and_refresh(self, commands: dict[str, Any]) -> None:
         """Send command and ensure fresh status update."""
         # Cache the command first
@@ -525,3 +542,56 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
     async def async_turn_off(self) -> None:
         """Turn the entity off."""
         await self._send_command_and_refresh({"operationMode": OPERATION_MODE_OFF})
+
+
+class KumoCloudTemperatureSensor(SensorEntity):
+    """Representation of a Kumo Cloud temperature sensor."""
+
+    def __init__(self, device: KumoCloudDevice) -> None:
+        """Initialize the temperature sensor."""
+        self.device = device
+        self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Temperature"
+        self._attr_unique_id = f"{device.device_serial}_temperature"
+        self._attr_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    @property
+    def state(self) -> float | None:
+        """Return the current temperature."""
+        adapter = self.device.zone_data.get("adapter", {})
+        return adapter.get("roomTemp")
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.device.device_serial)},
+            name=self.device.zone_data.get("name", "Kumo Cloud Device"),
+            manufacturer="Mitsubishi Electric",
+        )
+
+
+class KumoCloudHumiditySensor(SensorEntity):
+    """Representation of a Kumo Cloud humidity sensor."""
+
+    def __init__(self, device: KumoCloudDevice) -> None:
+        """Initialize the humidity sensor."""
+        self.device = device
+        self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Humidity"
+        self._attr_unique_id = f"{device.device_serial}_humidity"
+        self._attr_unit_of_measurement = "%"
+
+    @property
+    def state(self) -> int | None:
+        """Return the current humidity."""
+        adapter = self.device.zone_data.get("adapter", {})
+        device_data = self.device.device_data
+        return device_data.get("humidity", adapter.get("humidity"))
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.device.device_serial)},
+            name=self.device.zone_data.get("name", "Kumo Cloud Device"),
+            manufacturer="Mitsubishi Electric",
+        )

@@ -156,7 +156,7 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             # Check if the device already exists and the updatedAt matches
             if (
                 device_serial in self.devices
-                and "updatedAt" in self.devices[device_serial]
+                and "updatedAt" in device_detail
             ):
                 self.cull_cached_commands(device_serial, device_detail.get("updatedAt"))
 
@@ -226,12 +226,12 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
         for key in to_remove:
             del self.cached_commands[key]
 
-        # Log only if commands were culled
-        if to_remove:
-            _LOGGER.debug(
-                "Culled %d cached commands for device %s on or after %s", len(to_remove), device_serial, date
-            )
-
+        # Log the culled and remaining commands
+        remaining_count = len(self.cached_commands)
+        _LOGGER.debug(
+            "Culled %d cached commands for device %s on or after %s. Remaining cached commands: %d",
+            len(to_remove), device_serial, date, remaining_count
+        )
 
 class KumoCloudDevice:
     """Representation of a Kumo Cloud device."""
