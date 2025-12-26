@@ -206,7 +206,7 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
         """Cache a command with its value and timestamp."""
         current_time = datetime.now(timezone.utc).isoformat()
         self.cached_commands[(device_serial, command)] = (current_time, value)
-        _LOGGER.debug("Cached command in device data: %s", command)
+        _LOGGER.debug("Cached command in device data: %s at %s", command, current_time)
 
     def cull_cached_commands(self, device_serial: str, date: str) -> None:
         """Remove cached commands for a device where the date is on or after the item's timestamp."""
@@ -221,6 +221,18 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             # Check if the device_serial matches and the input date is on or after the cached date
             if cached_device_serial == device_serial and input_date >= cached_date_obj:
                 to_remove.append(key)
+            else:
+                # Log details if the condition fails
+                _LOGGER.debug(
+                    "Skipping cached command: cached_device_serial=%s, device_serial=%s, "
+                    "input_date=%s, cached_date_obj=%s, date=%s, cached_date=%s",
+                    cached_device_serial,
+                    device_serial,
+                    input_date,
+                    cached_date_obj,
+                    date,
+                    cached_date,
+                )
 
         # Remove the matching keys
         for key in to_remove:

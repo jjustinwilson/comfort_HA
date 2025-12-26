@@ -553,6 +553,7 @@ class KumoCloudTemperatureSensor(SensorEntity):
         self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Temperature"
         self._attr_unique_id = f"{device.device_serial}_temperature"
         self._attr_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_device_class = "temperature"  # Explicitly define as a temperature sensor
 
     @property
     def state(self) -> float | None:
@@ -579,6 +580,7 @@ class KumoCloudHumiditySensor(SensorEntity):
         self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Humidity"
         self._attr_unique_id = f"{device.device_serial}_humidity"
         self._attr_unit_of_measurement = "%"
+        self._attr_device_class = "humidity"  # Explicitly define as a humidity sensor
 
     @property
     def state(self) -> int | None:
