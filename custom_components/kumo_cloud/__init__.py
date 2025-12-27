@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import KumoCloudAPI, KumoCloudAuthError, KumoCloudConnectionError
 from .const import CONF_SITE_ID, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .sensor import async_setup_entry as async_setup_sensor_entry
 
 _LOGGER = logging.getLogger(__name__)
 
