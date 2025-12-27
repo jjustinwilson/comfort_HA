@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import TEMP_CELSIUS
+from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -46,7 +46,7 @@ class KumoCloudTemperatureSensor(SensorEntity):
         self.device = device
         self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Temperature"
         self._attr_unique_id = f"{device.device_serial}_temperature"
-        self._attr_native_unit_of_measurement = TEMP_CELSIUS  # Use native unit
+        self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS  # Use native unit
         self._attr_device_class = "temperature"  # Explicitly define as a temperature sensor
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
