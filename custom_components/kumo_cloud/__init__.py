@@ -15,12 +15,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import KumoCloudAPI, KumoCloudAuthError, KumoCloudConnectionError
 from .const import CONF_SITE_ID, DEFAULT_SCAN_INTERVAL, DOMAIN
-from .sensor import async_setup_entry as async_setup_sensor_entry
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.CLIMATE]
-
+PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Kumo Cloud from a config entry."""
