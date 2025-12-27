@@ -309,9 +309,8 @@ class KumoCloudDevice:
     async def send_command(self, commands: dict[str, Any]) -> None:
         """Send a command to the device and refresh status."""
         try:
-            # Send the command
-            await self.coordinator.api.send_command(self.device_serial, commands)
-            _LOGGER.debug("Sent command to device %s: %s", self.device_serial, commands)
+            response = await self.coordinator.api.send_command(self.device_serial, commands)
+            _LOGGER.debug("Sent command to device %s: %s, Response: %s", self.device_serial, commands, response)
 
             # Wait a moment for the command to be processed
             await asyncio.sleep(1)
