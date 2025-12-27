@@ -95,6 +95,17 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
         # Values: A tuple of (ISO 8601 UTC timestamp: str, command value: Any).
         self.cached_commands: dict[tuple[str, str], tuple[str, Any]] = {}
 
+    def _process_pending_commands(self, device_serial: str, device_detail: dict[str, Any]) -> None:
+        """Process cached commands and cull outdated commands for a device."""
+        # Check if the device already exists and the updatedAt matches
+        if device_serial in self.devices and "updatedAt" in device_detail:
+            self.cull_cached_commands(device_serial, device_detail.get("updatedAt"))
+
+        # Reapply cached commands to the device details
+        for (cached_device_serial, command), (_, command_value) in self.cached_commands.items():
+            if cached_device_serial == device_serial:
+                device_detail[command] = command_value
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Kumo Cloud."""
         try:
@@ -116,6 +127,9 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
                     device_detail, device_profile = await asyncio.gather(
                         device_detail_task, device_profile_task
                     )
+
+                    # Process pending commands for the device
+                    self._process_pending_commands(device_serial, device_detail)
 
                     devices[device_serial] = device_detail
                     device_profiles[device_serial] = device_profile
@@ -152,17 +166,108 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             # Get fresh device details
             device_detail = await self.api.get_device_details(device_serial)
 
-            # Check if the device already exists and the updatedAt matches
-            if (
-                device_serial in self.devices
-                and "updatedAt" in device_detail
-            ):
-                self.cull_cached_commands(device_serial, device_detail.get("updatedAt"))
+            # Process pending commands for the device
+            self._process_pending_commands(device_serial, device_detail)
 
-            # Reapply cached commands to the device details
-            for (cached_device_serial, command), (_, command_value) in self.cached_commands.items():
-                if cached_device_serial == device_serial:
-                    device_detail[command] = command_value
+            # Update the cached device data
+            self.devices[device_serial] = device_detail
+
+            # Also update the zone data if it contains the same info
+            for zone in self.zones:
+                if "adapter" in zone and zone["adapter"]:
+                    if zone["adapter"]["deviceSerial"] == device_serial:
+                        # Update adapter data with fresh device data
+                        zone["adapter"].update(
+                            {
+                                "roomTemp": device_detail.get("roomTemp"),
+                                "operationMode": device_detail.get("operationMode"),
+                                "power": device_detail.get("power"),
+                                "fanSpeed": device_detail.get("fanSpeed"),
+                                "airDirection": device_detail.get("airDirection"),
+                                "spCool": device_detail.get("spCool"),
+                                "spHeat": device_detail.get("spHeat"),
+                                "humidity": device_detail.get("humidity"),
+                            }
+                        )
+                        break
+
+            # Update the coordinator's data dict
+            self.data = {
+                "zones": self.zones,
+                "devices": self.devices,
+                "device_profiles": self.device_profiles,
+            }
+
+            # Notify all listeners that data has been updated
+            self.async_update_listeners()
+
+            _LOGGER.debug("Refreshed device %s data", device_serial)
+
+        except Exception as err:
+            _LOGGER.warning("Failed to refresh device %s: %s", device_serial, err)
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from Kumo Cloud."""
+        try:
+            # Get zones for the site
+            zones = await self.api.get_zones(self.site_id)
+
+            # Get device details for each zone
+            devices = {}
+            device_profiles = {}
+
+            for zone in zones:
+                if "adapter" in zone and zone["adapter"]:
+                    device_serial = zone["adapter"]["deviceSerial"]
+
+                    # Get device details and profile in parallel
+                    device_detail_task = self.api.get_device_details(device_serial)
+                    device_profile_task = self.api.get_device_profile(device_serial)
+
+                    device_detail, device_profile = await asyncio.gather(
+                        device_detail_task, device_profile_task
+                    )
+
+                    # Process pending commands for the device
+                    self._process_pending_commands(device_serial, device_detail)
+
+                    devices[device_serial] = device_detail
+                    device_profiles[device_serial] = device_profile
+
+            # Store the data for access by entities
+            self.zones = zones
+            self.devices = devices
+            self.device_profiles = device_profiles
+
+            return {
+                "zones": zones,
+                "devices": devices,
+                "device_profiles": device_profiles,
+            }
+
+        except KumoCloudAuthError as err:
+            # Try to refresh token once
+            try:
+                await self.api.refresh_access_token()
+                # Retry the request
+                return await self._async_update_data()
+            except KumoCloudAuthError as refresh_err:
+                raise UpdateFailed(
+                    f"Authentication failed: {refresh_err}"
+                ) from refresh_err
+        except KumoCloudConnectionError as err:
+            raise UpdateFailed(f"Error communicating with API: {err}") from err
+        except Exception as err:
+            raise UpdateFailed(f"Unexpected error: {err}") from err
+
+    async def async_refresh_device(self, device_serial: str) -> None:
+        """Refresh a specific device's data immediately."""
+        try:
+            # Get fresh device details
+            device_detail = await self.api.get_device_details(device_serial)
+
+            # Process pending commands for the device
+            self._process_pending_commands(device_serial, device_detail)
 
             # Update the cached device data
             self.devices[device_serial] = device_detail
