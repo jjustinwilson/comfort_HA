@@ -11,6 +11,10 @@ from homeassistant.components.climate import (
     HVACAction,
     HVACMode,
 )
+from homeassistant.components.climate.const import (
+    ATTR_TARGET_TEMP_HIGH,
+    ATTR_TARGET_TEMP_LOW,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -18,7 +22,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import KumoCloudDataUpdateCoordinator, KumoCloudDevice
+from .coordinator import KumoCloudDataUpdateCoordinator, KumoCloudDevice
 from .const import (
     DOMAIN,
     OPERATION_MODE_OFF,
@@ -27,6 +31,8 @@ from .const import (
     OPERATION_MODE_DRY,
     OPERATION_MODE_VENT,
     OPERATION_MODE_AUTO,
+    OPERATION_MODE_AUTO_COOL,
+    OPERATION_MODE_AUTO_HEAT,
     FAN_SPEED_AUTO,
     FAN_SPEED_LOW,
     FAN_SPEED_MEDIUM,
@@ -46,10 +52,19 @@ KUMO_TO_HVAC_MODE = {
     OPERATION_MODE_DRY: HVACMode.DRY,
     OPERATION_MODE_VENT: HVACMode.FAN_ONLY,
     OPERATION_MODE_AUTO: HVACMode.HEAT_COOL,
+    OPERATION_MODE_AUTO_COOL: HVACMode.HEAT_COOL,
+    OPERATION_MODE_AUTO_HEAT: HVACMode.HEAT_COOL,
 }
 
 # Reverse mapping
-HVAC_TO_KUMO_MODE = {v: k for k, v in KUMO_TO_HVAC_MODE.items()}
+HVAC_TO_KUMO_MODE = {
+    HVACMode.OFF: OPERATION_MODE_OFF,
+    HVACMode.COOL: OPERATION_MODE_COOL,
+    HVACMode.HEAT: OPERATION_MODE_HEAT,
+    HVACMode.DRY: OPERATION_MODE_DRY,
+    HVACMode.FAN_ONLY: OPERATION_MODE_VENT,
+    HVACMode.HEAT_COOL: OPERATION_MODE_AUTO,
+}
 
 # Fan speed mappings
 KUMO_FAN_SPEEDS = [FAN_SPEED_AUTO, FAN_SPEED_LOW, FAN_SPEED_MEDIUM, FAN_SPEED_HIGH]
@@ -121,6 +136,10 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
             if profile_data.get("hasVaneDir", False):
                 features |= ClimateEntityFeature.SWING_MODE
 
+            # Check if device supports both heat and cool (for dual setpoint support)
+            if profile_data.get("hasModeHeat", False):
+                features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+
         self._attr_supported_features = features
 
     @property
@@ -156,11 +175,27 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
             return adapter.get("spCool")
         elif hvac_mode == HVACMode.HEAT:
             return adapter.get("spHeat")
-        elif hvac_mode == HVACMode.HEAT_COOL:
-            # For auto mode, could return either cool or heat setpoint
-            # Return the cool setpoint as default
-            return adapter.get("spCool") or adapter.get("spHeat")
 
+        return None
+
+    @property
+    def target_temperature_high(self) -> float | None:
+        """Return the upper bound temperature for heat/cool mode."""
+        if self.hvac_mode == HVACMode.HEAT_COOL:
+            adapter = self.device.zone_data.get("adapter", {})
+            device_data = self.device.device_data
+            # Use device data if available (more current), otherwise use adapter data
+            return device_data.get("spCool", adapter.get("spCool"))
+        return None
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        """Return the lower bound temperature for heat/cool mode."""
+        if self.hvac_mode == HVACMode.HEAT_COOL:
+            adapter = self.device.zone_data.get("adapter", {})
+            device_data = self.device.device_data
+            # Use device data if available (more current), otherwise use adapter data
+            return device_data.get("spHeat", adapter.get("spHeat"))
         return None
 
     @property
@@ -240,17 +275,33 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
             return HVACAction.DRYING
         elif operation_mode == OPERATION_MODE_VENT:
             return HVACAction.FAN
-        elif operation_mode == OPERATION_MODE_AUTO:
+        elif operation_mode in (
+            OPERATION_MODE_AUTO,
+            OPERATION_MODE_AUTO_COOL,
+            OPERATION_MODE_AUTO_HEAT,
+        ):
             # For auto mode, determine action based on current vs target temperature
             current_temp = self.current_temperature
-            target_temp = self.target_temperature
-
-            if current_temp is not None and target_temp is not None:
-                temp_diff = current_temp - target_temp
-                if temp_diff > 1.0:  # More than 1 degree above target
-                    return HVACAction.COOLING
-                elif temp_diff < -1.0:  # More than 1 degree below target
-                    return HVACAction.HEATING
+            
+            if current_temp is not None:
+                # For autoCool/autoHeat, use the specific mode's action
+                if operation_mode == OPERATION_MODE_AUTO_COOL:
+                    target_temp = self.target_temperature_high
+                    if target_temp is not None and current_temp > target_temp + 0.5:
+                        return HVACAction.COOLING
+                elif operation_mode == OPERATION_MODE_AUTO_HEAT:
+                    target_temp = self.target_temperature_low
+                    if target_temp is not None and current_temp < target_temp - 0.5:
+                        return HVACAction.HEATING
+                else:
+                    # For generic auto mode, check both setpoints
+                    high_temp = self.target_temperature_high
+                    low_temp = self.target_temperature_low
+                    
+                    if high_temp is not None and current_temp > high_temp + 0.5:
+                        return HVACAction.COOLING
+                    elif low_temp is not None and current_temp < low_temp - 0.5:
+                        return HVACAction.HEATING
 
             # Default to idle for auto mode if we can't determine
             return HVACAction.IDLE
@@ -347,11 +398,32 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         """Return True if entity is available."""
         return self.device.available and self.coordinator.last_update_success
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the optional state attributes."""
+        attributes = super().extra_state_attributes or {}
+
+        # Add humidity to the attributes
+        adapter = self.device.zone_data.get("adapter", {})
+        device_data = self.device.device_data
+        humidity = device_data.get("humidity", adapter.get("humidity"))
+        if humidity is not None:
+            attributes["humidity"] = humidity
+
+        return attributes
+
     async def _send_command_and_refresh(self, commands: dict[str, Any]) -> None:
         """Send command and ensure fresh status update."""
+        # Cache the command first
+        self.device.cache_commands(commands)
+
+        # Trigger a state update for this entity to reflect cached changes
+        self.async_write_ha_state()
+
+        # Send the command and refresh the device
         await self.device.send_command(commands)
-        # The device.send_command method now handles refreshing the device status
-        # Also trigger a state update for this entity to reflect changes immediately
+
+        # Trigger another state update to reflect refreshed changes
         self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -380,32 +452,50 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
-        target_temp = kwargs.get(ATTR_TEMPERATURE)
-        if target_temp is None:
-            return
-
         hvac_mode = self.hvac_mode
         commands = {}
 
         adapter = self.device.zone_data.get("adapter", {})
         device_data = self.device.device_data
 
-        if hvac_mode == HVACMode.COOL:
-            commands["spCool"] = target_temp
-            # Maintain heat setpoint
-            sp_heat = device_data.get("spHeat", adapter.get("spHeat"))
-            if sp_heat is not None:
-                commands["spHeat"] = sp_heat
-        elif hvac_mode == HVACMode.HEAT:
-            commands["spHeat"] = target_temp
-            # Maintain cool setpoint
-            sp_cool = device_data.get("spCool", adapter.get("spCool"))
-            if sp_cool is not None:
-                commands["spCool"] = sp_cool
-        elif hvac_mode == HVACMode.HEAT_COOL:
-            # For auto mode, set both setpoints based on current temperature
-            commands["spCool"] = target_temp
-            commands["spHeat"] = target_temp - 2  # 2 degree hysteresis
+        if hvac_mode == HVACMode.HEAT_COOL:
+            # Handle dual setpoint mode
+            target_temp_high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
+            target_temp_low = kwargs.get(ATTR_TARGET_TEMP_LOW)
+            
+            if target_temp_high is not None:
+                commands["spCool"] = target_temp_high
+            else:
+                # Maintain existing high setpoint
+                sp_cool = device_data.get("spCool", adapter.get("spCool"))
+                if sp_cool is not None:
+                    commands["spCool"] = sp_cool
+                    
+            if target_temp_low is not None:
+                commands["spHeat"] = target_temp_low
+            else:
+                # Maintain existing low setpoint
+                sp_heat = device_data.get("spHeat", adapter.get("spHeat"))
+                if sp_heat is not None:
+                    commands["spHeat"] = sp_heat
+        else:
+            # Handle single setpoint modes
+            target_temp = kwargs.get(ATTR_TEMPERATURE)
+            if target_temp is None:
+                return
+
+            if hvac_mode == HVACMode.COOL:
+                commands["spCool"] = target_temp
+                # Maintain heat setpoint
+                sp_heat = device_data.get("spHeat", adapter.get("spHeat"))
+                if sp_heat is not None:
+                    commands["spHeat"] = sp_heat
+            elif hvac_mode == HVACMode.HEAT:
+                commands["spHeat"] = target_temp
+                # Maintain cool setpoint
+                sp_cool = device_data.get("spCool", adapter.get("spCool"))
+                if sp_cool is not None:
+                    commands["spCool"] = sp_cool
 
         if commands:
             await self._send_command_and_refresh(commands)
