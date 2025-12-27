@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import TEMP_CELSIUS
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -46,11 +46,12 @@ class KumoCloudTemperatureSensor(SensorEntity):
         self.device = device
         self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Temperature"
         self._attr_unique_id = f"{device.device_serial}_temperature"
-        self._attr_unit_of_measurement = UnitOfTemperature.CELSIUS
+        self._attr_native_unit_of_measurement = TEMP_CELSIUS  # Use native unit
         self._attr_device_class = "temperature"  # Explicitly define as a temperature sensor
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
-    def state(self) -> float | None:
+    def native_value(self) -> float | None:
         """Return the current temperature."""
         adapter = self.device.zone_data.get("adapter", {})
         return adapter.get("roomTemp")
@@ -73,11 +74,12 @@ class KumoCloudHumiditySensor(SensorEntity):
         self.device = device
         self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Humidity"
         self._attr_unique_id = f"{device.device_serial}_humidity"
-        self._attr_unit_of_measurement = "%"
+        self._attr_native_unit_of_measurement = "%"  # Use native unit
         self._attr_device_class = "humidity"  # Explicitly define as a humidity sensor
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
-    def state(self) -> int | None:
+    def native_value(self) -> int | None:
         """Return the current humidity."""
         adapter = self.device.zone_data.get("adapter", {})
         device_data = self.device.device_data
