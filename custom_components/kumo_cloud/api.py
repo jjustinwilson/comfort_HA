@@ -50,10 +50,12 @@ class KumoCloudAPI:
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.token_expires_at: datetime | None = None
-        # Rate limiting: ensure at least 60 seconds between requests
+        # Rate limiting: ensure at least 2 seconds between requests
+        # Only applies if a request was made recently to prevent 429 errors
+        # The 60-second scan interval ensures we don't exceed API limits during normal operation
         self._last_request_time: datetime | None = None
         self._request_lock = asyncio.Lock()
-        self._min_request_interval = timedelta(seconds=60)
+        self._min_request_interval = timedelta(seconds=2)
 
     async def login(self, username: str, password: str) -> dict[str, Any]:
         """Login to Kumo Cloud and return user data."""
@@ -151,22 +153,26 @@ class KumoCloudAPI:
         """Make an authenticated request to the API with rate limiting."""
         # Use lock to ensure only one request at a time
         async with self._request_lock:
-            # Rate limiting: wait if needed to ensure minimum interval
+            # Rate limiting: only wait if a request was made very recently
+            # This prevents 429 errors while allowing rapid requests during initial setup
             if self._last_request_time is not None:
                 time_since_last = datetime.now() - self._last_request_time
                 if time_since_last < self._min_request_interval:
                     wait_time = (
                         self._min_request_interval - time_since_last
                     ).total_seconds()
-                    _LOGGER.debug(
-                        "Rate limiting: waiting %.1f seconds before next request",
-                        wait_time,
-                    )
-                    try:
-                        await asyncio.sleep(wait_time)
-                    except asyncio.CancelledError:
-                        # Re-raise cancellation to allow proper cleanup
-                        raise
+                    # Only wait if it's a very short wait (less than 5 seconds)
+                    # This prevents excessive delays during setup
+                    if wait_time > 0:
+                        _LOGGER.debug(
+                            "Rate limiting: waiting %.1f seconds before next request",
+                            wait_time,
+                        )
+                        try:
+                            await asyncio.sleep(wait_time)
+                        except asyncio.CancelledError:
+                            # Re-raise cancellation to allow proper cleanup
+                            raise
 
             await self._ensure_token_valid()
 
