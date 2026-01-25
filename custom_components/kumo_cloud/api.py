@@ -162,7 +162,11 @@ class KumoCloudAPI:
                         "Rate limiting: waiting %.1f seconds before next request",
                         wait_time,
                     )
-                    await asyncio.sleep(wait_time)
+                    try:
+                        await asyncio.sleep(wait_time)
+                    except asyncio.CancelledError:
+                        # Re-raise cancellation to allow proper cleanup
+                        raise
 
             await self._ensure_token_valid()
 
@@ -214,7 +218,11 @@ class KumoCloudAPI:
                                             attempt + 1,
                                             max_retries,
                                         )
-                                        await asyncio.sleep(retry_delay)
+                                        try:
+                                            await asyncio.sleep(retry_delay)
+                                        except asyncio.CancelledError:
+                                            # Re-raise cancellation to allow proper cleanup
+                                            raise
                                         retry_delay *= 2  # Exponential backoff
                                         continue
                                     else:
@@ -244,7 +252,11 @@ class KumoCloudAPI:
                                 attempt + 1,
                                 max_retries,
                             )
-                            await asyncio.sleep(retry_delay)
+                            try:
+                                await asyncio.sleep(retry_delay)
+                            except asyncio.CancelledError:
+                                # Re-raise cancellation to allow proper cleanup
+                                raise
                             retry_delay *= 2
                             continue
                         raise KumoCloudConnectionError(
