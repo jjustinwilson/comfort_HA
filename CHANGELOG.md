@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HVACMode.HEAT_COOL now activates when these modes are reported
 - Granular fan and vane control with user-friendly labels
 - Optimistic UI updates for immediate feedback
+- Temperature and humidity sensor entities
+- Command caching with timestamps to prevent state bouncing
+- Immediate status refresh after sending commands
+- Rate limiting to prevent API 429 errors (2-second minimum interval between requests)
+- Retry logic with exponential backoff for failed API requests
 
 ### Fixed
 - Temperature synchronization issue when Home Assistant is configured to display Fahrenheit
@@ -19,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Ensures consistent temperature readings across HA, MHK2 thermostats, and Comfort Cloud app
   - Resolves issue where unsnapped Celsius conversions (e.g., 18.8889°C for 66°F) caused mismatches
 - Multiple sites configuration issue
+- State bouncing issue where UI would revert to old state before updating with new value
+- Improved responsiveness by caching commands until API confirms changes
+
+### Changed
+- Moved coordinator logic to separate coordinator.py module for better organization
+- Enhanced command handling with automatic cache culling based on API update timestamps
 
 ## [1.0.0] - 2024-01-01
 
