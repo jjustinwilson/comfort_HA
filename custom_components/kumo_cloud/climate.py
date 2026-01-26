@@ -29,13 +29,12 @@ from .const import (
     OPERATION_MODE_AUTO,
     OPERATION_MODE_AUTO_COOL,
     OPERATION_MODE_AUTO_HEAT,
-    FAN_SPEED_AUTO,
-    FAN_SPEED_LOW,
-    FAN_SPEED_MEDIUM,
-    FAN_SPEED_HIGH,
-    AIR_DIRECTION_HORIZONTAL,
-    AIR_DIRECTION_VERTICAL,
-    AIR_DIRECTION_SWING,
+    API_TO_UI_FAN,
+    UI_TO_API_FAN,
+    UI_FAN_SPEEDS,
+    API_TO_UI_VANE,
+    UI_TO_API_VANE,
+    UI_VANE_POSITIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,24 +52,7 @@ KUMO_TO_HVAC_MODE = {
 }
 
 # Reverse mapping
-HVAC_TO_KUMO_MODE = {
-    HVACMode.OFF: OPERATION_MODE_OFF,
-    HVACMode.COOL: OPERATION_MODE_COOL,
-    HVACMode.HEAT: OPERATION_MODE_HEAT,
-    HVACMode.DRY: OPERATION_MODE_DRY,
-    HVACMode.FAN_ONLY: OPERATION_MODE_VENT,
-    HVACMode.HEAT_COOL: OPERATION_MODE_AUTO,
-}
-
-# Fan speed mappings
-KUMO_FAN_SPEEDS = [FAN_SPEED_AUTO, FAN_SPEED_LOW, FAN_SPEED_MEDIUM, FAN_SPEED_HIGH]
-
-# Air direction mappings
-KUMO_AIR_DIRECTIONS = [
-    AIR_DIRECTION_HORIZONTAL,
-    AIR_DIRECTION_VERTICAL,
-    AIR_DIRECTION_SWING,
-]
+HVAC_TO_KUMO_MODE = {v: k for k, v in KUMO_TO_HVAC_MODE.items()}
 
 
 async def async_setup_entry(
@@ -106,6 +88,9 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         self.device = device
         self._attr_unique_id = device.unique_id
 
+        # Optimistic state cache - stores values we've commanded but haven't confirmed yet
+        self._optimistic_state: dict[str, Any] = {}
+
         # Set up supported features based on device profile
         self._setup_supported_features()
 
@@ -134,6 +119,35 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
 
         self._attr_supported_features = features
 
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        # When we get fresh data from the cloud, clear optimistic values that match
+        device_data = self.device.device_data
+        adapter = self.device.zone_data.get("adapter", {})
+
+        # Clear optimistic values if cloud state matches what we commanded
+        keys_to_remove = []
+        for key in list(self._optimistic_state.keys()):
+            cloud_value = device_data.get(key, adapter.get(key))
+            if cloud_value == self._optimistic_state[key]:
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            del self._optimistic_state[key]
+
+        super()._handle_coordinator_update()
+
+    def _get_value(self, key: str) -> Any:
+        """Get a value, preferring optimistic state over cloud state."""
+        # If we have an optimistic value, use it
+        if key in self._optimistic_state:
+            return self._optimistic_state[key]
+
+        # Otherwise use cloud data
+        device_data = self.device.device_data
+        adapter = self.device.zone_data.get("adapter", {})
+        return device_data.get(key, adapter.get(key))
+
     @property
     def device_info(self) -> DeviceInfo:
         """Return device information."""
@@ -160,32 +174,29 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
     @property
     def target_temperature(self) -> float | None:
         """Return the target temperature."""
-        adapter = self.device.zone_data.get("adapter", {})
         hvac_mode = self.hvac_mode
 
         if hvac_mode == HVACMode.COOL:
-            return adapter.get("spCool")
+            return self._get_value("spCool")
         elif hvac_mode == HVACMode.HEAT:
-            return adapter.get("spHeat")
+            return self._get_value("spHeat")
         elif hvac_mode == HVACMode.HEAT_COOL:
             # For auto mode, could return either cool or heat setpoint
             # Return the cool setpoint as default
-            return adapter.get("spCool") or adapter.get("spHeat")
+            return self._get_value("spCool") or self._get_value("spHeat")
 
         return None
 
     @property
     def hvac_mode(self) -> HVACMode:
         """Return current HVAC mode."""
-        # Check both adapter (zone) and device data for most current status
-        adapter = self.device.zone_data.get("adapter", {})
-        device_data = self.device.device_data
+        operation_mode = self._get_value("operationMode")
+        if operation_mode is None:
+            operation_mode = OPERATION_MODE_OFF
 
-        # Use device data if available (more current), otherwise use adapter data
-        operation_mode = device_data.get(
-            "operationMode", adapter.get("operationMode", OPERATION_MODE_OFF)
-        )
-        power = device_data.get("power", adapter.get("power", 0))
+        power = self._get_value("power")
+        if power is None:
+            power = 0
 
         # If power is 0, device is off regardless of operation mode
         if power == 0:
@@ -227,15 +238,12 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         if hvac_mode == HVACMode.OFF:
             return HVACAction.OFF
 
-        # Check both adapter (zone) and device data for most current status
-        adapter = self.device.zone_data.get("adapter", {})
-        device_data = self.device.device_data
-
-        # Use device data if available (more current), otherwise use adapter data
-        power = device_data.get("power", adapter.get("power", 0))
-        operation_mode = device_data.get(
-            "operationMode", adapter.get("operationMode", OPERATION_MODE_OFF)
-        )
+        power = self._get_value("power")
+        if power is None:
+            power = 0
+        operation_mode = self._get_value("operationMode")
+        if operation_mode is None:
+            operation_mode = OPERATION_MODE_OFF
 
         if power == 0:
             return HVACAction.OFF
@@ -275,15 +283,17 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def fan_mode(self) -> str | None:
-        """Return current fan mode."""
-        # Check device data first, then adapter data
-        device_data = self.device.device_data
-        adapter = self.device.zone_data.get("adapter", {})
-        return device_data.get("fanSpeed", adapter.get("fanSpeed"))
+        """Return current fan mode (translated to user-friendly label)."""
+        api_fan_speed = self._get_value("fanSpeed")
+
+        # Translate API value to UI label
+        if api_fan_speed:
+            return API_TO_UI_FAN.get(api_fan_speed, api_fan_speed)
+        return None
 
     @property
     def fan_modes(self) -> list[str] | None:
-        """Return the list of available fan modes."""
+        """Return the list of available fan modes based on device capabilities."""
         profile = self.device.profile_data
         if not profile:
             return None
@@ -294,24 +304,27 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         if num_fan_speeds == 0:
             return None
 
-        # Return fan modes based on number of speeds supported
-        modes = [FAN_SPEED_AUTO]
-        if num_fan_speeds >= 1:
-            modes.append(FAN_SPEED_LOW)
-        if num_fan_speeds >= 2:
-            modes.append(FAN_SPEED_MEDIUM)
-        if num_fan_speeds >= 3:
-            modes.append(FAN_SPEED_HIGH)
+        # Return auto plus the number of speeds the device supports
+        # Note: numberOfFanSpeeds seems to underreport by 1 for some devices (cassettes)
+        # Add +1 to account for this, which gives cassettes: Auto, Quiet, Low, Medium, High
+        # And allows wall/floor units with more speeds to show all available options
+        modes = [UI_FAN_SPEEDS[0]]  # Always include auto
+
+        # Add speeds based on device capability, with +1 to account for underreporting
+        for i in range(1, min(num_fan_speeds + 2, len(UI_FAN_SPEEDS))):
+            modes.append(UI_FAN_SPEEDS[i])
 
         return modes
 
     @property
     def swing_mode(self) -> str | None:
-        """Return current swing mode."""
-        # Check device data first, then adapter data
-        device_data = self.device.device_data
-        adapter = self.device.zone_data.get("adapter", {})
-        return device_data.get("airDirection", adapter.get("airDirection"))
+        """Return current vane position (translated to user-friendly label)."""
+        api_vane_position = self._get_value("airDirection")
+
+        # Translate API value to UI label
+        if api_vane_position:
+            return API_TO_UI_VANE.get(api_vane_position, api_vane_position)
+        return None
 
     @property
     def swing_modes(self) -> list[str] | None:
@@ -322,13 +335,11 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
 
         profile_data = profile[0] if isinstance(profile, list) else profile
 
-        modes = []
-        if profile_data.get("hasVaneDir", False) or profile_data.get(
-            "hasVaneSwing", False
-        ):
-            modes.extend(KUMO_AIR_DIRECTIONS)
+        # If device supports vane control, return all positions
+        if profile_data.get("hasVaneDir", False) or profile_data.get("hasVaneSwing", False):
+            return UI_VANE_POSITIONS.copy()
 
-        return modes if modes else None
+        return None
 
     @property
     def min_temp(self) -> float:
@@ -357,17 +368,31 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         """Return the supported step of target temperature."""
         return 0.5  # Kumo Cloud typically supports 0.5 degree steps
 
+    def _snap_temperature(self, temp: float | None) -> float | None:
+        """Snap temperature to nearest 0.5°C increment.
+
+        This ensures temperatures are always on the API's valid grid,
+        preventing discrepancies when HA is configured to display in Fahrenheit.
+        """
+        if temp is None:
+            return None
+        return round(temp * 2) / 2
+
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
         return self.device.available and self.coordinator.last_update_success
 
     async def _send_command_and_refresh(self, commands: dict[str, Any]) -> None:
-        """Send command and ensure fresh status update."""
-        await self.device.send_command(commands)
-        # The device.send_command method now handles refreshing the device status
-        # Also trigger a state update for this entity to reflect changes immediately
+        """Send command, update optimistic state, and refresh."""
+        # Store commanded values in optimistic state
+        self._optimistic_state.update(commands)
+
+        # Immediately update UI with optimistic values
         self.async_write_ha_state()
+
+        # Send command to device
+        await self.device.send_command(commands)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set new target HVAC mode."""
@@ -379,12 +404,8 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
                 commands = {"operationMode": kumo_mode}
 
                 # Include current setpoints to maintain them
-                adapter = self.device.zone_data.get("adapter", {})
-                device_data = self.device.device_data
-
-                # Use device data if available, otherwise adapter data
-                sp_cool = device_data.get("spCool", adapter.get("spCool"))
-                sp_heat = device_data.get("spHeat", adapter.get("spHeat"))
+                sp_cool = self._get_value("spCool")
+                sp_heat = self._get_value("spHeat")
 
                 if sp_cool is not None:
                     commands["spCool"] = sp_cool
@@ -399,60 +420,56 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         if target_temp is None:
             return
 
+        # Snap to 0.5°C increments for API compatibility
+        target_temp = self._snap_temperature(target_temp)
+
         hvac_mode = self.hvac_mode
         commands = {}
-
-        adapter = self.device.zone_data.get("adapter", {})
-        device_data = self.device.device_data
 
         if hvac_mode == HVACMode.COOL:
             commands["spCool"] = target_temp
             # Maintain heat setpoint
-            sp_heat = device_data.get("spHeat", adapter.get("spHeat"))
+            sp_heat = self._get_value("spHeat")
             if sp_heat is not None:
                 commands["spHeat"] = sp_heat
         elif hvac_mode == HVACMode.HEAT:
             commands["spHeat"] = target_temp
             # Maintain cool setpoint
-            sp_cool = device_data.get("spCool", adapter.get("spCool"))
+            sp_cool = self._get_value("spCool")
             if sp_cool is not None:
                 commands["spCool"] = sp_cool
         elif hvac_mode == HVACMode.HEAT_COOL:
             # For auto mode, set both setpoints based on current temperature
             commands["spCool"] = target_temp
-            commands["spHeat"] = target_temp - 2  # 2 degree hysteresis
+            commands["spHeat"] = self._snap_temperature(target_temp - 2)  # 2 degree hysteresis
 
         if commands:
             await self._send_command_and_refresh(commands)
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
-        """Set new target fan mode."""
-        await self._send_command_and_refresh({"fanSpeed": fan_mode})
+        """Set new target fan mode (translate UI label to API value)."""
+        # Translate UI label to API value
+        api_value = UI_TO_API_FAN.get(fan_mode, fan_mode)
+        await self._send_command_and_refresh({"fanSpeed": api_value})
 
     async def async_set_swing_mode(self, swing_mode: str) -> None:
-        """Set new target swing mode."""
-        await self._send_command_and_refresh({"airDirection": swing_mode})
+        """Set new target swing mode (translate UI label to API value)."""
+        # Translate UI label to API value
+        api_value = UI_TO_API_VANE.get(swing_mode, swing_mode)
+        await self._send_command_and_refresh({"airDirection": api_value})
 
     async def async_turn_on(self) -> None:
         """Turn the entity on."""
         # Turn on with the last used mode, or cool mode if no previous mode
-        adapter = self.device.zone_data.get("adapter", {})
-        device_data = self.device.device_data
-
-        # Use device data if available, otherwise adapter data
-        operation_mode = device_data.get(
-            "operationMode", adapter.get("operationMode", OPERATION_MODE_COOL)
-        )
-
-        # If the operation mode is "off", default to cool
-        if operation_mode == OPERATION_MODE_OFF:
+        operation_mode = self._get_value("operationMode")
+        if operation_mode is None or operation_mode == OPERATION_MODE_OFF:
             operation_mode = OPERATION_MODE_COOL
 
         commands = {"operationMode": operation_mode}
 
         # Include setpoints
-        sp_cool = device_data.get("spCool", adapter.get("spCool"))
-        sp_heat = device_data.get("spHeat", adapter.get("spHeat"))
+        sp_cool = self._get_value("spCool")
+        sp_heat = self._get_value("spHeat")
 
         if sp_cool is not None:
             commands["spCool"] = sp_cool
