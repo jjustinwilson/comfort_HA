@@ -44,7 +44,10 @@ class KumoCloudAPI:
     def __init__(self, hass: HomeAssistant) -> None:
         """Initialize the API client."""
         self.hass = hass
-        self.session = async_get_clientsession(hass)
+        # Create dedicated session with appropriate timeouts for Kumo Cloud API
+        # The API frequently takes longer than 10 seconds to respond
+        self.timeout = ClientTimeout(total=45, connect=15, sock_read=30)
+        self.session: aiohttp.ClientSession | None = None
         self.base_url = API_BASE_URL
         self.username: str | None = None
         self.access_token: str | None = None
@@ -57,8 +60,19 @@ class KumoCloudAPI:
         self._request_lock = asyncio.Lock()
         self._min_request_interval = timedelta(seconds=2)
 
+    async def _ensure_session(self) -> None:
+        """Ensure the session is created."""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(timeout=self.timeout)
+
+    async def close(self) -> None:
+        """Close the session."""
+        if self.session and not self.session.closed:
+            await self.session.close()
+
     async def login(self, username: str, password: str) -> dict[str, Any]:
         """Login to Kumo Cloud and return user data."""
+        await self._ensure_session()
         url = f"{self.base_url}/{API_VERSION}/login"
         headers = {
             "x-app-version": API_APP_VERSION,
@@ -71,23 +85,20 @@ class KumoCloudAPI:
         }
 
         try:
-            async with asyncio.timeout(10):
-                async with self.session.post(
-                    url, headers=headers, json=data
-                ) as response:
-                    if response.status == 403:
-                        raise KumoCloudAuthError("Invalid username or password")
-                    response.raise_for_status()
-                    result = await response.json()
+            async with self.session.post(url, headers=headers, json=data) as response:
+                if response.status == 403:
+                    raise KumoCloudAuthError("Invalid username or password")
+                response.raise_for_status()
+                result = await response.json()
 
-                    self.username = username
-                    self.access_token = result["token"]["access"]
-                    self.refresh_token = result["token"]["refresh"]
-                    self.token_expires_at = datetime.now() + timedelta(
-                        seconds=TOKEN_REFRESH_INTERVAL
-                    )
+                self.username = username
+                self.access_token = result["token"]["access"]
+                self.refresh_token = result["token"]["refresh"]
+                self.token_expires_at = datetime.now() + timedelta(
+                    seconds=TOKEN_REFRESH_INTERVAL
+                )
 
-                    return result
+                return result
 
         except asyncio.TimeoutError as err:
             raise KumoCloudConnectionError("Connection timeout") from err
@@ -103,6 +114,7 @@ class KumoCloudAPI:
         if not self.refresh_token:
             raise KumoCloudAuthError("No refresh token available")
 
+        await self._ensure_session()
         url = f"{self.base_url}/{API_VERSION}/refresh"
         headers = {
             "x-app-version": API_APP_VERSION,
@@ -111,20 +123,17 @@ class KumoCloudAPI:
         data = {"refresh": self.refresh_token}
 
         try:
-            async with asyncio.timeout(10):
-                async with self.session.post(
-                    url, headers=headers, json=data
-                ) as response:
-                    if response.status == 401:
-                        raise KumoCloudAuthError("Refresh token expired")
-                    response.raise_for_status()
-                    result = await response.json()
+            async with self.session.post(url, headers=headers, json=data) as response:
+                if response.status == 401:
+                    raise KumoCloudAuthError("Refresh token expired")
+                response.raise_for_status()
+                result = await response.json()
 
-                    self.access_token = result["access"]
-                    self.refresh_token = result["refresh"]
-                    self.token_expires_at = datetime.now() + timedelta(
-                        seconds=TOKEN_REFRESH_INTERVAL
-                    )
+                self.access_token = result["access"]
+                self.refresh_token = result["refresh"]
+                self.token_expires_at = datetime.now() + timedelta(
+                    seconds=TOKEN_REFRESH_INTERVAL
+                )
 
         except asyncio.TimeoutError as err:
             raise KumoCloudConnectionError("Connection timeout during refresh") from err
@@ -175,6 +184,7 @@ class KumoCloudAPI:
                             raise
 
             await self._ensure_token_valid()
+            await self._ensure_session()
 
             url = f"{self.base_url}/{API_VERSION}{endpoint}"
             headers = {
@@ -189,37 +199,34 @@ class KumoCloudAPI:
             for attempt in range(max_retries):
                 got_429 = False
                 try:
-                    # Use a longer timeout to account for network delays (30 seconds)
-                    # Note: 429 retry sleeps happen outside this timeout context
-                    async with asyncio.timeout(30):
-                        if method.upper() == "GET":
-                            async with self.session.get(url, headers=headers) as response:
-                                if response.status == 429:
-                                    got_429 = True
-                                    # Will handle sleep outside timeout context
-                                else:
-                                    response.raise_for_status()
-                                    result = await response.json()
-                                    self._last_request_time = datetime.now()
-                                    return result
-                        elif method.upper() == "POST":
-                            async with self.session.post(
-                                url, headers=headers, json=data
-                            ) as response:
-                                if response.status == 429:
-                                    got_429 = True
-                                    # Will handle sleep outside timeout context
-                                else:
-                                    response.raise_for_status()
-                                    result = (
-                                        await response.json()
-                                        if response.content_type == "application/json"
-                                        else {}
-                                    )
-                                    self._last_request_time = datetime.now()
-                                    return result
+                    # Use ClientTimeout configured in session instead of asyncio.timeout
+                    # This allows the API to take longer than 10 seconds without hard-killing requests
+                    if method.upper() == "GET":
+                        async with self.session.get(url, headers=headers) as response:
+                            if response.status == 429:
+                                got_429 = True
+                            else:
+                                response.raise_for_status()
+                                result = await response.json()
+                                self._last_request_time = datetime.now()
+                                return result
+                    elif method.upper() == "POST":
+                        async with self.session.post(
+                            url, headers=headers, json=data
+                        ) as response:
+                            if response.status == 429:
+                                got_429 = True
+                            else:
+                                response.raise_for_status()
+                                result = (
+                                    await response.json()
+                                    if response.content_type == "application/json"
+                                    else {}
+                                )
+                                self._last_request_time = datetime.now()
+                                return result
 
-                    # Handle 429 outside timeout context to avoid timeout during sleep
+                    # Handle 429 errors with exponential backoff
                     if got_429:
                         if attempt < max_retries - 1:
                             _LOGGER.warning(
