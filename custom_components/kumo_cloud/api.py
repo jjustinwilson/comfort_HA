@@ -50,6 +50,12 @@ class KumoCloudAPI:
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.token_expires_at: datetime | None = None
+        # Rate limiting: ensure at least 2 seconds between requests
+        # Only applies if a request was made recently to prevent 429 errors
+        # The 60-second scan interval ensures we don't exceed API limits during normal operation
+        self._last_request_time: datetime | None = None
+        self._request_lock = asyncio.Lock()
+        self._min_request_interval = timedelta(seconds=2)
 
     async def login(self, username: str, password: str) -> dict[str, Any]:
         """Login to Kumo Cloud and return user data."""
@@ -144,37 +150,124 @@ class KumoCloudAPI:
     async def _request(
         self, method: str, endpoint: str, data: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Make an authenticated request to the API."""
-        await self._ensure_token_valid()
+        """Make an authenticated request to the API with rate limiting."""
+        # Use lock to ensure only one request at a time
+        async with self._request_lock:
+            # Rate limiting: only wait if a request was made very recently
+            # This prevents 429 errors while allowing rapid requests during initial setup
+            if self._last_request_time is not None:
+                time_since_last = datetime.now() - self._last_request_time
+                if time_since_last < self._min_request_interval:
+                    wait_time = (
+                        self._min_request_interval - time_since_last
+                    ).total_seconds()
+                    # Only wait if it's a very short wait (less than 5 seconds)
+                    # This prevents excessive delays during setup
+                    if wait_time > 0:
+                        _LOGGER.debug(
+                            "Rate limiting: waiting %.1f seconds before next request",
+                            wait_time,
+                        )
+                        try:
+                            await asyncio.sleep(wait_time)
+                        except asyncio.CancelledError:
+                            # Re-raise cancellation to allow proper cleanup
+                            raise
 
-        url = f"{self.base_url}/{API_VERSION}{endpoint}"
-        headers = {
-            "x-app-version": API_APP_VERSION,
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json",
-        }
+            await self._ensure_token_valid()
 
-        try:
-            async with asyncio.timeout(20):
-                if method.upper() == "GET":
-                    async with self.session.get(url, headers=headers) as response:
-                        response.raise_for_status()
-                        return await response.json()
-                elif method.upper() == "POST":
-                    async with self.session.post(
-                        url, headers=headers, json=data
-                    ) as response:
-                        response.raise_for_status()
-                        if response.content_type == "application/json":
-                            return await response.json()
-                        return {}
+            url = f"{self.base_url}/{API_VERSION}{endpoint}"
+            headers = {
+                "x-app-version": API_APP_VERSION,
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+            }
 
-        except asyncio.TimeoutError as err:
-            raise KumoCloudConnectionError("Request timeout") from err
-        except ClientResponseError as err:
-            if err.status == 401:
-                raise KumoCloudAuthError("Authentication failed") from err
-            raise KumoCloudConnectionError(f"HTTP error: {err.status}") from err
+            max_retries = 3
+            retry_delay = 60  # Start with 60 seconds for 429 errors
+
+            for attempt in range(max_retries):
+                got_429 = False
+                try:
+                    # Use a longer timeout to account for network delays (30 seconds)
+                    # Note: 429 retry sleeps happen outside this timeout context
+                    async with asyncio.timeout(30):
+                        if method.upper() == "GET":
+                            async with self.session.get(url, headers=headers) as response:
+                                if response.status == 429:
+                                    got_429 = True
+                                    # Will handle sleep outside timeout context
+                                else:
+                                    response.raise_for_status()
+                                    result = await response.json()
+                                    self._last_request_time = datetime.now()
+                                    return result
+                        elif method.upper() == "POST":
+                            async with self.session.post(
+                                url, headers=headers, json=data
+                            ) as response:
+                                if response.status == 429:
+                                    got_429 = True
+                                    # Will handle sleep outside timeout context
+                                else:
+                                    response.raise_for_status()
+                                    result = (
+                                        await response.json()
+                                        if response.content_type == "application/json"
+                                        else {}
+                                    )
+                                    self._last_request_time = datetime.now()
+                                    return result
+
+                    # Handle 429 outside timeout context to avoid timeout during sleep
+                    if got_429:
+                        if attempt < max_retries - 1:
+                            _LOGGER.warning(
+                                "Rate limited (429). Waiting %d seconds before retry %d/%d",
+                                retry_delay,
+                                attempt + 1,
+                                max_retries,
+                            )
+                            try:
+                                await asyncio.sleep(retry_delay)
+                            except asyncio.CancelledError:
+                                raise
+                            retry_delay *= 2  # Exponential backoff
+                            continue
+                        else:
+                            raise KumoCloudConnectionError(
+                                "Rate limit exceeded. Please try again later."
+                            )
+
+                except asyncio.TimeoutError as err:
+                    if attempt < max_retries - 1:
+                        _LOGGER.warning(
+                            "Request timeout. Retrying %d/%d", attempt + 1, max_retries
+                        )
+                        continue
+                    raise KumoCloudConnectionError("Request timeout") from err
+                except ClientResponseError as err:
+                    if err.status == 401:
+                        raise KumoCloudAuthError("Authentication failed") from err
+                    if err.status == 429:
+                        # This shouldn't happen as we handle it above, but just in case
+                        if attempt < max_retries - 1:
+                            _LOGGER.warning(
+                                "Rate limited (429). Waiting %d seconds before retry %d/%d",
+                                retry_delay,
+                                attempt + 1,
+                                max_retries,
+                            )
+                            try:
+                                await asyncio.sleep(retry_delay)
+                            except asyncio.CancelledError:
+                                raise
+                            retry_delay *= 2
+                            continue
+                        raise KumoCloudConnectionError(
+                            "Rate limit exceeded. Please try again later."
+                        ) from err
+                    raise KumoCloudConnectionError(f"HTTP error: {err.status}") from err
 
     async def get_account_info(self) -> dict[str, Any]:
         """Get account information."""
