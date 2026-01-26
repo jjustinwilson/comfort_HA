@@ -134,8 +134,9 @@ class KumoCloudConfigFlow(ConfigFlow, domain=DOMAIN):
             site for site in self.data["sites"] if site["id"] == self.data[CONF_SITE_ID]
         )
 
-        # Use username as unique ID
-        await self.async_set_unique_id(self.data[CONF_USERNAME])
+        # Use username and site ID as unique ID to allow multiple sites per account
+        unique_id = f"{self.data[CONF_USERNAME]}_{self.data[CONF_SITE_ID]}"
+        await self.async_set_unique_id(unique_id)
         self._abort_if_unique_id_configured()
 
         return self.async_create_entry(
