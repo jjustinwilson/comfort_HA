@@ -122,27 +122,76 @@ class KumoCloudAPI:
         }
         data = {"refresh": self.refresh_token}
 
-        try:
-            async with self.session.post(url, headers=headers, json=data) as response:
-                if response.status == 401:
-                    raise KumoCloudAuthError("Refresh token expired")
-                response.raise_for_status()
-                result = await response.json()
+        max_retries = 3
+        retry_delay = 60  # Start with 60 seconds for 429 errors
 
-                self.access_token = result["access"]
-                self.refresh_token = result["refresh"]
-                self.token_expires_at = datetime.now() + timedelta(
-                    seconds=TOKEN_REFRESH_INTERVAL
-                )
+        for attempt in range(max_retries):
+            try:
+                async with self.session.post(url, headers=headers, json=data) as response:
+                    if response.status == 401:
+                        raise KumoCloudAuthError("Refresh token expired")
+                    if response.status == 429:
+                        # Handle rate limiting with retry
+                        if attempt < max_retries - 1:
+                            _LOGGER.warning(
+                                "Rate limited (429) during token refresh. Waiting %d seconds before retry %d/%d",
+                                retry_delay,
+                                attempt + 1,
+                                max_retries,
+                            )
+                            try:
+                                await asyncio.sleep(retry_delay)
+                            except asyncio.CancelledError:
+                                raise
+                            retry_delay *= 2  # Exponential backoff
+                            continue
+                        else:
+                            raise KumoCloudConnectionError(
+                                "Rate limit exceeded during token refresh. Please try again later."
+                            )
+                    response.raise_for_status()
+                    result = await response.json()
 
-        except asyncio.TimeoutError as err:
-            raise KumoCloudConnectionError("Connection timeout during refresh") from err
-        except ClientResponseError as err:
-            if err.status == 401:
-                raise KumoCloudAuthError("Refresh token expired") from err
-            raise KumoCloudConnectionError(
-                f"HTTP error during refresh: {err.status}"
-            ) from err
+                    self.access_token = result["access"]
+                    self.refresh_token = result["refresh"]
+                    self.token_expires_at = datetime.now() + timedelta(
+                        seconds=TOKEN_REFRESH_INTERVAL
+                    )
+                    return  # Success, exit retry loop
+
+            except asyncio.TimeoutError as err:
+                if attempt < max_retries - 1:
+                    _LOGGER.warning(
+                        "Connection timeout during token refresh. Retrying %d/%d",
+                        attempt + 1,
+                        max_retries,
+                    )
+                    continue
+                raise KumoCloudConnectionError("Connection timeout during refresh") from err
+            except ClientResponseError as err:
+                if err.status == 401:
+                    raise KumoCloudAuthError("Refresh token expired") from err
+                if err.status == 429:
+                    # This shouldn't happen as we handle it above, but just in case
+                    if attempt < max_retries - 1:
+                        _LOGGER.warning(
+                            "Rate limited (429) during token refresh. Waiting %d seconds before retry %d/%d",
+                            retry_delay,
+                            attempt + 1,
+                            max_retries,
+                        )
+                        try:
+                            await asyncio.sleep(retry_delay)
+                        except asyncio.CancelledError:
+                            raise
+                        retry_delay *= 2
+                        continue
+                    raise KumoCloudConnectionError(
+                        "Rate limit exceeded during token refresh. Please try again later."
+                    ) from err
+                raise KumoCloudConnectionError(
+                    f"HTTP error during refresh: {err.status}"
+                ) from err
 
     async def _ensure_token_valid(self) -> None:
         """Ensure access token is valid, refresh if needed."""
