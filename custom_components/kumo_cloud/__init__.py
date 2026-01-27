@@ -69,7 +69,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        if entry.entry_id in hass.data.get(DOMAIN, {}):
+            coordinator = hass.data[DOMAIN][entry.entry_id]
+            # Close the API session
+            await coordinator.api.close()
+            hass.data[DOMAIN].pop(entry.entry_id)
 
     return unload_ok
 
@@ -90,6 +94,9 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
         self.zones: list[dict[str, Any]] = []
         self.devices: dict[str, dict[str, Any]] = {}
         self.device_profiles: dict[str, list[dict[str, Any]]] = {}
+        # Track consecutive failures to avoid marking unavailable on transient errors
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 5  # Only mark unavailable after 5 consecutive failures
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Kumo Cloud."""
@@ -121,6 +128,9 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             self.devices = devices
             self.device_profiles = device_profiles
 
+            # Reset failure counter on successful update
+            self._consecutive_failures = 0
+
             return {
                 "zones": zones,
                 "devices": devices,
@@ -134,13 +144,61 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
                 # Retry the request
                 return await self._async_update_data()
             except KumoCloudAuthError as refresh_err:
-                raise UpdateFailed(
-                    f"Authentication failed: {refresh_err}"
-                ) from refresh_err
+                self._consecutive_failures += 1
+                # Authentication errors are critical - always raise
+                if self._consecutive_failures >= self._max_consecutive_failures:
+                    raise UpdateFailed(
+                        f"Authentication failed: {refresh_err}"
+                    ) from refresh_err
+                # Return last known data for transient auth issues
+                _LOGGER.warning(
+                    "Authentication error (attempt %d/%d), using last known state",
+                    self._consecutive_failures,
+                    self._max_consecutive_failures,
+                )
+                return {
+                    "zones": self.zones,
+                    "devices": self.devices,
+                    "device_profiles": self.device_profiles,
+                }
         except KumoCloudConnectionError as err:
-            raise UpdateFailed(f"Error communicating with API: {err}") from err
+            self._consecutive_failures += 1
+            error_msg = str(err).lower()
+            # Check if this is a transient error (429, timeout) vs critical error
+            is_transient = "429" in error_msg or "timeout" in error_msg or "rate limit" in error_msg
+
+            if is_transient and self._consecutive_failures < self._max_consecutive_failures:
+                # For transient errors, return last known data to keep entities available
+                _LOGGER.warning(
+                    "Transient API error (attempt %d/%d): %s. Using last known state.",
+                    self._consecutive_failures,
+                    self._max_consecutive_failures,
+                    err,
+                )
+                return {
+                    "zones": self.zones,
+                    "devices": self.devices,
+                    "device_profiles": self.device_profiles,
+                }
+            else:
+                # Only raise UpdateFailed after multiple consecutive failures
+                raise UpdateFailed(f"Error communicating with API: {err}") from err
         except Exception as err:
-            raise UpdateFailed(f"Unexpected error: {err}") from err
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._max_consecutive_failures:
+                raise UpdateFailed(f"Unexpected error: {err}") from err
+            # Return last known data for transient errors
+            _LOGGER.warning(
+                "Unexpected error (attempt %d/%d): %s. Using last known state.",
+                self._consecutive_failures,
+                self._max_consecutive_failures,
+                err,
+            )
+            return {
+                "zones": self.zones,
+                "devices": self.devices,
+                "device_profiles": self.device_profiles,
+            }
 
     async def async_refresh_device(self, device_serial: str) -> None:
         """Refresh a specific device's data immediately."""

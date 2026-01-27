@@ -345,7 +345,15 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        return self.device.available and self.coordinator.last_update_success
+        # Keep entity available if we have data, even if last update failed
+        # This prevents automations from triggering when entity comes back online
+        has_data = (
+            self.device.zone_data
+            and self.device.device_data
+            and self.coordinator.data is not None
+        )
+        # Only mark unavailable if we have no data at all
+        return has_data and self.device.available
 
     async def _send_command_and_refresh(self, commands: dict[str, Any]) -> None:
         """Send command and ensure fresh status update."""
