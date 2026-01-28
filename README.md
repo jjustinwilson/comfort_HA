@@ -46,8 +46,8 @@ This integration allows you to control your Mitsubishi Electric climate control 
 ## Supported Features
 
 - **Temperature Control**: Set target temperature with 0.5°C precision
-- **Fan Speed Control**: Auto, Low, Medium, High (depending on device capabilities)
-- **Air Direction Control**: Horizontal, Vertical, Swing (if supported by device)
+- **Fan Speed Control**: Auto, Quiet, Low, Medium, High, Powerful (depending on device capabilities)
+- **Air Direction Control**: Auto, Swing, Lowest, Low, Middle, High, Highest (if supported by device)
 - **Current Temperature**: Monitor room temperature
 - **Humidity Monitoring**: View current humidity levels
 
