@@ -33,6 +33,7 @@ This integration allows you to control your Mitsubishi Electric climate control 
 - **Multi-Zone Support**: Control multiple zones within a site
 - **Automatic Token Refresh**: Handles authentication token refresh automatically
 - **Device Profiles**: Automatically detects device capabilities and adjusts available features
+- **Auto Heat/Cool Boundary**: Supports units reporting `autoHeat` or `autoCool` modes with upper and lower setpoints
 
 ## Supported HVAC Modes
 
