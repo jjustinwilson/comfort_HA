@@ -38,6 +38,61 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# Mitsubishi's custom Fahrenheit-to-Celsius lookup table for setpoints.
+# Derived from the Comfort app / MA remote controller's actual behavior.
+# Standard math (round to nearest 0.5°C) diverges from Mitsubishi's mapping
+# at several points (64-66°F and 69-72°F), so we use this table to ensure
+# HA, the Comfort app, and the physical thermostat all agree.
+_F_TO_C: dict[int, float] = {
+    61: 16.0, 62: 16.5, 63: 17.0, 64: 17.5, 65: 18.0, 66: 18.5,
+    67: 19.5, 68: 20.0, 69: 21.0, 70: 21.5, 71: 22.0, 72: 22.5,
+    73: 23.0, 74: 23.5, 75: 24.0, 76: 24.5, 77: 25.0, 78: 25.5,
+    79: 26.0, 80: 26.5,
+}
+
+# Celsius-to-Fahrenheit lookup for display. This is NOT a simple inverse of
+# _F_TO_C because Mitsubishi's C->F mapping for room temperature display
+# differs from the setpoint mapping at certain values (e.g. 19.0°C = 67°F
+# for display, but 67°F = 19.5°C for setpoints).
+_C_TO_F: dict[float, int] = {
+    16.0: 61, 16.5: 62, 17.0: 63, 17.5: 64, 18.0: 65, 18.5: 66,
+    19.0: 67, 19.5: 67, 20.0: 68, 20.5: 69,
+    21.0: 69, 21.5: 70, 22.0: 71, 22.5: 72,
+    23.0: 73, 23.5: 74, 24.0: 75, 24.5: 76, 25.0: 77, 25.5: 78,
+    26.0: 79, 26.5: 80,
+}
+
+
+def _c_to_f(celsius: float | None) -> float | None:
+    """Convert Celsius to Fahrenheit using Mitsubishi's lookup table.
+
+    Falls back to standard rounding for values outside the table
+    (e.g. current room temperature readings that may not be exact setpoints).
+    """
+    if celsius is None:
+        return None
+    if celsius in _C_TO_F:
+        return _C_TO_F[celsius]
+    # Fallback for values not in the table (room temp readings, etc.)
+    return round(celsius * 9.0 / 5.0 + 32.0)
+
+
+def _f_to_c(fahrenheit: float | None) -> float | None:
+    """Convert Fahrenheit to Celsius using Mitsubishi's lookup table.
+
+    Falls back to standard rounding for values outside the table.
+    """
+    if fahrenheit is None:
+        return None
+    f_int = int(round(fahrenheit))
+    if f_int in _F_TO_C:
+        return _F_TO_C[f_int]
+    # Fallback for values outside the table
+    celsius = (fahrenheit - 32.0) * 5.0 / 9.0
+    return round(celsius * 2.0) / 2.0
+
+
 # Mapping from Kumo Cloud operation modes to Home Assistant HVAC modes
 KUMO_TO_HVAC_MODE = {
     OPERATION_MODE_OFF: HVACMode.OFF,
@@ -85,7 +140,7 @@ async def async_setup_entry(
 class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
     """Representation of a Kumo Cloud climate device."""
 
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
     _attr_has_entity_name = True
     _attr_name = None
 
@@ -144,7 +199,7 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
     def current_temperature(self) -> float | None:
         """Return the current temperature."""
         adapter = self.device.zone_data.get("adapter", {})
-        return adapter.get("roomTemp")
+        return _c_to_f(adapter.get("roomTemp"))
 
     @property
     def target_temperature(self) -> float | None:
@@ -153,13 +208,13 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         hvac_mode = self.hvac_mode
 
         if hvac_mode == HVACMode.COOL:
-            return adapter.get("spCool")
+            return _c_to_f(adapter.get("spCool"))
         elif hvac_mode == HVACMode.HEAT:
-            return adapter.get("spHeat")
+            return _c_to_f(adapter.get("spHeat"))
         elif hvac_mode == HVACMode.HEAT_COOL:
             # For auto mode, could return either cool or heat setpoint
             # Return the cool setpoint as default
-            return adapter.get("spCool") or adapter.get("spHeat")
+            return _c_to_f(adapter.get("spCool") or adapter.get("spHeat"))
 
         return None
 
@@ -322,9 +377,10 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         if profile:
             profile_data = profile[0] if isinstance(profile, list) else profile
             min_setpoints = profile_data.get("minimumSetPoints", {})
-            # Return the minimum of heat and cool setpoints
-            return min(min_setpoints.get("heat", 16), min_setpoints.get("cool", 16))
-        return 16.0
+            # Return the minimum of heat and cool setpoints, converted to F
+            min_c = min(min_setpoints.get("heat", 16), min_setpoints.get("cool", 16))
+            return _c_to_f(min_c)
+        return _c_to_f(16.0)
 
     @property
     def max_temp(self) -> float:
@@ -333,14 +389,15 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         if profile:
             profile_data = profile[0] if isinstance(profile, list) else profile
             max_setpoints = profile_data.get("maximumSetPoints", {})
-            # Return the maximum of heat and cool setpoints
-            return max(max_setpoints.get("heat", 30), max_setpoints.get("cool", 30))
-        return 30.0
+            # Return the maximum of heat and cool setpoints, converted to F
+            max_c = max(max_setpoints.get("heat", 30), max_setpoints.get("cool", 30))
+            return _c_to_f(max_c)
+        return _c_to_f(30.0)
 
     @property
     def target_temperature_step(self) -> float:
         """Return the supported step of target temperature."""
-        return 0.5  # Kumo Cloud typically supports 0.5 degree steps
+        return 1.0  # 1°F steps (maps to ~0.5°C steps internally)
 
     @property
     def available(self) -> bool:
@@ -380,9 +437,12 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
-        target_temp = kwargs.get(ATTR_TEMPERATURE)
-        if target_temp is None:
+        target_temp_f = kwargs.get(ATTR_TEMPERATURE)
+        if target_temp_f is None:
             return
+
+        # Convert from Fahrenheit to nearest 0.5°C for the API
+        target_temp_c = _f_to_c(target_temp_f)
 
         hvac_mode = self.hvac_mode
         commands = {}
@@ -391,21 +451,21 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
         device_data = self.device.device_data
 
         if hvac_mode == HVACMode.COOL:
-            commands["spCool"] = target_temp
-            # Maintain heat setpoint
+            commands["spCool"] = target_temp_c
+            # Maintain heat setpoint (already in Celsius from API)
             sp_heat = device_data.get("spHeat", adapter.get("spHeat"))
             if sp_heat is not None:
                 commands["spHeat"] = sp_heat
         elif hvac_mode == HVACMode.HEAT:
-            commands["spHeat"] = target_temp
-            # Maintain cool setpoint
+            commands["spHeat"] = target_temp_c
+            # Maintain cool setpoint (already in Celsius from API)
             sp_cool = device_data.get("spCool", adapter.get("spCool"))
             if sp_cool is not None:
                 commands["spCool"] = sp_cool
         elif hvac_mode == HVACMode.HEAT_COOL:
-            # For auto mode, set both setpoints based on current temperature
-            commands["spCool"] = target_temp
-            commands["spHeat"] = target_temp - 2  # 2 degree hysteresis
+            # For auto mode, set both setpoints
+            commands["spCool"] = target_temp_c
+            commands["spHeat"] = target_temp_c - 1.0  # ~2°F hysteresis in Celsius
 
         if commands:
             await self._send_command_and_refresh(commands)

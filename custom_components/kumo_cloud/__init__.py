@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -93,9 +94,13 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Kumo Cloud."""
+        poll_start = time.monotonic()
+        _LOGGER.debug("Starting data poll for site %s", self.site_id)
+
         try:
             # Get zones for the site
             zones = await self.api.get_zones(self.site_id)
+            _LOGGER.debug("Got %d zones in %.1fs", len(zones), time.monotonic() - poll_start)
 
             # Get device details for each zone
             devices = {}
@@ -104,6 +109,8 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             for zone in zones:
                 if "adapter" in zone and zone["adapter"]:
                     device_serial = zone["adapter"]["deviceSerial"]
+                    zone_name = zone.get("name", "Unknown")
+                    device_start = time.monotonic()
 
                     # Get device details and profile in parallel
                     device_detail_task = self.api.get_device_details(device_serial)
@@ -116,10 +123,39 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
                     devices[device_serial] = device_detail
                     device_profiles[device_serial] = device_profile
 
+                    # Log the key state data we got back
+                    adapter = zone.get("adapter", {})
+                    _LOGGER.debug(
+                        "Zone '%s' (%s) polled in %.1fs - "
+                        "adapter: roomTemp=%s, power=%s, mode=%s, spCool=%s, spHeat=%s | "
+                        "device: roomTemp=%s, power=%s, mode=%s, spCool=%s, spHeat=%s, connected=%s",
+                        zone_name,
+                        device_serial,
+                        time.monotonic() - device_start,
+                        adapter.get("roomTemp"),
+                        adapter.get("power"),
+                        adapter.get("operationMode"),
+                        adapter.get("spCool"),
+                        adapter.get("spHeat"),
+                        device_detail.get("roomTemp"),
+                        device_detail.get("power"),
+                        device_detail.get("operationMode"),
+                        device_detail.get("spCool"),
+                        device_detail.get("spHeat"),
+                        device_detail.get("connected"),
+                    )
+
             # Store the data for access by entities
             self.zones = zones
             self.devices = devices
             self.device_profiles = device_profiles
+
+            _LOGGER.debug(
+                "Data poll complete for site %s: %d devices updated in %.1fs",
+                self.site_id,
+                len(devices),
+                time.monotonic() - poll_start,
+            )
 
             return {
                 "zones": zones,
@@ -128,9 +164,11 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             }
 
         except KumoCloudAuthError as err:
+            _LOGGER.warning("Auth error during poll, attempting token refresh: %s", err)
             # Try to refresh token once
             try:
                 await self.api.refresh_access_token()
+                _LOGGER.debug("Token refresh successful, retrying poll")
                 # Retry the request
                 return await self._async_update_data()
             except KumoCloudAuthError as refresh_err:
@@ -138,8 +176,18 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
                     f"Authentication failed: {refresh_err}"
                 ) from refresh_err
         except KumoCloudConnectionError as err:
+            _LOGGER.warning(
+                "Connection error during poll after %.1fs: %s",
+                time.monotonic() - poll_start,
+                err,
+            )
             raise UpdateFailed(f"Error communicating with API: {err}") from err
         except Exception as err:
+            _LOGGER.error(
+                "Unexpected error during poll after %.1fs: %s",
+                time.monotonic() - poll_start,
+                err,
+            )
             raise UpdateFailed(f"Unexpected error: {err}") from err
 
     async def async_refresh_device(self, device_serial: str) -> None:
@@ -250,8 +298,18 @@ class KumoCloudDevice:
         """Send a command to the device and refresh status."""
         try:
             # Send the command
-            await self.coordinator.api.send_command(self.device_serial, commands)
-            _LOGGER.debug("Sent command to device %s: %s", self.device_serial, commands)
+            _LOGGER.debug(
+                "Sending command to device %s (%s): %s",
+                self.name,
+                self.device_serial,
+                commands,
+            )
+            result = await self.coordinator.api.send_command(self.device_serial, commands)
+            _LOGGER.debug(
+                "Command response from device %s: %s",
+                self.device_serial,
+                result,
+            )
 
             # Wait a moment for the command to be processed
             await asyncio.sleep(1)
@@ -261,6 +319,10 @@ class KumoCloudDevice:
 
         except Exception as err:
             _LOGGER.error(
-                "Failed to send command to device %s: %s", self.device_serial, err
+                "Failed to send command to device %s (%s): %s (command was: %s)",
+                self.name,
+                self.device_serial,
+                err,
+                commands,
             )
             raise

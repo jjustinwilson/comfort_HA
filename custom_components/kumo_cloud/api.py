@@ -154,24 +154,31 @@ class KumoCloudAPI:
             "Content-Type": "application/json",
         }
 
+        _LOGGER.debug("API %s %s", method.upper(), endpoint)
+
         try:
             async with asyncio.timeout(30):
                 if method.upper() == "GET":
                     async with self.session.get(url, headers=headers) as response:
                         response.raise_for_status()
-                        return await response.json()
+                        result = await response.json()
+                        _LOGGER.debug("API %s %s -> status %s", method.upper(), endpoint, response.status)
+                        return result
                 elif method.upper() == "POST":
                     async with self.session.post(
                         url, headers=headers, json=data
                     ) as response:
                         response.raise_for_status()
+                        _LOGGER.debug("API %s %s -> status %s", method.upper(), endpoint, response.status)
                         if response.content_type == "application/json":
                             return await response.json()
                         return {}
 
         except asyncio.TimeoutError as err:
+            _LOGGER.warning("API %s %s -> TIMEOUT (30s)", method.upper(), endpoint)
             raise KumoCloudConnectionError("Request timeout") from err
         except ClientResponseError as err:
+            _LOGGER.warning("API %s %s -> HTTP %s", method.upper(), endpoint, err.status)
             if err.status == 401:
                 raise KumoCloudAuthError("Authentication failed") from err
             raise KumoCloudConnectionError(f"HTTP error: {err.status}") from err
