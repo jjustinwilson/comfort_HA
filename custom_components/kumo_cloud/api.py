@@ -89,6 +89,8 @@ class KumoCloudAPI:
             if err.status == 403:
                 raise KumoCloudAuthError("Invalid credentials") from err
             raise KumoCloudConnectionError(f"HTTP error: {err.status}") from err
+        except KumoCloudError:
+            raise
         except Exception as err:
             raise KumoCloudConnectionError(f"Unexpected error: {err}") from err
 
