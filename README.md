@@ -6,32 +6,26 @@ Fork of [jjustinwilson/comfort_HA](https://github.com/jjustinwilson/comfort_HA) 
 
 ## What's different in this fork
 
-### Fan speed mapping
-The upstream integration passes raw Kumo Cloud API values (`quiet`, `low`, `powerful`) that don't match what the Comfort app or physical remote shows. This fork translates them to match the app labels (Quiet, Low, Medium, High, Powerful).
+### TTL-based command cache eviction
+Justin's fork culls cached commands by comparing against the `updatedAt` timestamp returned by the server — which can lag or be absent. This fork replaces that with a simple 60-second TTL: cached commands are evicted 60 seconds after they were sent, regardless of server state. More reliable in practice and easier to reason about.
 
-### Vane position mapping
-Same issue. Raw API values like `midvertical` and `midhorizontal` are translated to the Comfort app labels (Lowest, Low, Middle, High, Highest).
+### Serialized command dispatch with rate limiting
+A `_send_lock` ensures only one command is in flight at a time, and a 5-second minimum gap is enforced between consecutive commands to the same device. Prevents duplicate or out-of-order commands when the user rapidly changes settings in the UI.
 
-### Temperature conversion
-Mitsubishi uses a proprietary F-to-C lookup table that diverges from standard math at several setpoints (64-66 F, 69-72 F). This fork uses the same lookup table as the Comfort app, eliminating the ~1 F drift for Fahrenheit users. Based on [ekiczek's work](https://github.com/ekiczek/comfort_HA) (PR #23).
+### Resilient entity availability
+`available()` checks whether cached zone/device data exists in memory rather than gating on `last_update_success`. This keeps entities available and showing their last-known state through transient API poll failures, instead of going unavailable and losing the current state display.
 
-### Wireless sensor support (PAC-USWHS003-TH-1)
-For zones with a Mitsubishi wireless temperature/humidity sensor attached, the integration creates additional entities for battery level, signal strength (RSSI), and the wireless sensor's own temperature and humidity readings. The `hasSensor` flag in the zone data is used to detect which devices have a wireless sensor, and the data is fetched from the `/v3/devices/{serial}/sensor` endpoint (discovered via traffic analysis of the Comfort app).
+### Dynamic temperature unit
+`temperature_unit` reads from `hass.config.units.temperature_unit` at runtime rather than being computed once at setup. Correctly reflects any change to HA's unit system without requiring a restart.
 
-### Command caching / anti-bounce
-The Comfort cloud API can take up to a minute to reflect changes from sent commands. Previous code that queried a second after issuing a command would "bounce" the state back to what it was before. This fork caches commands with timestamps and examines the `updatedAt` field returned by the server to keep queued commands applied until a server update confirms the command was processed. Based on [smack000's work](https://github.com/smack000/comfort_HA).
+### Unit-aware HVAC action dead-band
+The dead-band used to determine whether the unit is actively heating or cooling is 1.0 °F when HA is configured in Fahrenheit and 0.5 °C in Celsius, matching the resolution of the Kumo Cloud API in each unit system.
 
-### Auto heat/cool mode
-Proper support for Mitsubishi's `autoCool` and `autoHeat` operation modes, mapped to HA's `HEAT_COOL` mode with dual setpoint support (separate heat and cool target temperatures).
+### Single source of truth for device state
+All state properties (temperature, setpoints, HVAC mode, fan speed, vane position) read exclusively from `GET /devices/{serial}` — the fresher, more complete API endpoint. Zone adapter data (`GET /zones`) is no longer used for state reads. Transient fetch failures preserve the last-known device state rather than blanking it out.
 
-### Temperature and humidity sensors
-Standalone sensor entities for each zone, usable in automations, history graphs, and dashboard cards independently from the climate entity.
-
-### Diagnostic sensors
-WiFi adapter firmware version and signal strength (RSSI) from the `/v3/devices/{serial}/status` endpoint, plus filter maintenance reminders from `/v3/zones/{id}/notification-preferences`. All exposed as diagnostic entities.
-
-### Refactored architecture
-API client and coordinator extracted into separate modules (`api.py`, `coordinator.py`), eliminating blocking load dependencies between the climate and sensor platforms. Includes retry logic with exponential backoff for API rate limits (429 errors).
+### Versioned log output
+All log messages are prefixed with `[vN]` (where N is `LOG_VERSION` in `const.py`) via a `_VersionedLogger` adapter. Makes it straightforward to correlate log entries from a specific deployment when troubleshooting across HA log files.
 
 ## Installation
 

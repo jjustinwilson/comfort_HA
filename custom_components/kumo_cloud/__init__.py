@@ -9,10 +9,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from .api import KumoCloudAPI, KumoCloudAuthError, KumoCloudConnectionError
-from .coordinator import KumoCloudDataUpdateCoordinator
-from .const import CONF_SITE_ID, DOMAIN
+from .coordinator import KumoCloudDataUpdateCoordinator, _VersionedLogger
+from .const import CONF_SITE_ID, DOMAIN, LOG_VERSION
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = _VersionedLogger(logging.getLogger(__name__))
 
 PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR]
 
@@ -57,6 +57,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    _LOGGER.info(
+        "Kumo Cloud integration started (log_version=%d, site_id=%s)",
+        LOG_VERSION,
+        entry.data[CONF_SITE_ID],
+    )
 
     return True
 

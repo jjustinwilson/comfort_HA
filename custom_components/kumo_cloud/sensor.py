@@ -32,6 +32,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    ATTR_TEMPERATURE,
     EntityCategory,
     PERCENTAGE,
     SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
@@ -42,11 +43,10 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .coordinator import KumoCloudDataUpdateCoordinator, KumoCloudDevice
+from .coordinator import KumoCloudDataUpdateCoordinator, KumoCloudDevice, _VersionedLogger
 from .const import DOMAIN
 
-_LOGGER = logging.getLogger(__name__)
-
+_LOGGER = _VersionedLogger(logging.getLogger(__name__))
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -101,21 +101,35 @@ class KumoCloudTemperatureSensor(CoordinatorEntity, SensorEntity):
     """Temperature from the indoor unit's built-in thermistor."""
 
     def __init__(self, coordinator: KumoCloudDataUpdateCoordinator, device: KumoCloudDevice) -> None:
+        """Initialize the temperature sensor."""
         super().__init__(coordinator)
         self.device = device
         self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Temperature"
         self._attr_unique_id = f"{device.device_serial}_temperature"
+        # NOTE: native_unit_of_measurement = CELSIUS means HA uses standard math
+        # (temp * 9/5 + 32) when displaying in Fahrenheit. This diverges from
+        # Mitsubishi's proprietary F<->C lookup tables used by the climate entity
+        # (see _c_to_f / _C_TO_F in climate.py). At certain values the two
+        # entities will show different readings for the same underlying roomTemp:
+        #   19.0 °C → sensor 66 °F (std) vs climate 67 °F (table)
+        #   21.0 °C → sensor 70 °F (std) vs climate 69 °F (table)
+        #   22.0 °C → sensor 72 °F (std) vs climate 71 °F (table)
+        # Fixing this requires dropping native_unit_of_measurement and managing
+        # the unit dynamically (matching hass.config.units.temperature_unit), which
+        # also means sharing the lookup tables with this module — consider extracting
+        # them to a shared temp_util.py. Deferred: impact is cosmetic/display-only.
         self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
         self._attr_device_class = SensorDeviceClass.TEMPERATURE
         self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
     def native_value(self) -> float | None:
-        adapter = self.device.zone_data.get("adapter", {})
-        return adapter.get("roomTemp")
+        """Return the current temperature."""
+        return self.device.device_data.get("roomTemp")
 
     @property
     def device_info(self) -> DeviceInfo:
+        """Return device information."""
         return _device_info(self.device)
 
 
@@ -123,6 +137,7 @@ class KumoCloudHumiditySensor(CoordinatorEntity, SensorEntity):
     """Humidity from the indoor unit."""
 
     def __init__(self, coordinator: KumoCloudDataUpdateCoordinator, device: KumoCloudDevice) -> None:
+        """Initialize the humidity sensor."""
         super().__init__(coordinator)
         self.device = device
         self._attr_name = f"{device.zone_data.get('name', 'Kumo Cloud')} Humidity"
@@ -133,12 +148,12 @@ class KumoCloudHumiditySensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        adapter = self.device.zone_data.get("adapter", {})
-        device_data = self.device.device_data
-        return device_data.get("humidity", adapter.get("humidity"))
+        """Return the current humidity."""
+        return self.device.device_data.get("humidity")
 
     @property
     def device_info(self) -> DeviceInfo:
+        """Return device information."""
         return _device_info(self.device)
 
 
@@ -232,7 +247,7 @@ class KumoCloudFilterReminderSensor(CoordinatorEntity, SensorEntity):
         """Include reminder interval as an attribute."""
         notifications = self.device.zone_notification_data
         if notifications:
-            attrs = {}
+            attrs: dict[str, Any] = {}
             interval = notifications.get("filterDirtyReminderInterval")
             if interval is not None:
                 attrs["reminder_interval_days"] = interval
