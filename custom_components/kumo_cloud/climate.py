@@ -478,6 +478,13 @@ class KumoCloudClimate(CoordinatorEntity, ClimateEntity):
     # ---- Misc properties ----------------------------------------------------
 
     @property
+    def current_humidity(self) -> float | None:
+        """Return current humidity from the V3 device or adapter payload."""
+        adapter = self.device.zone_data.get("adapter", {})
+        device_data = self.device.device_data
+        return device_data.get("humidity", adapter.get("humidity"))
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the optional state attributes."""
         attributes = super().extra_state_attributes or {}
