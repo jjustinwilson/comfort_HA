@@ -128,6 +128,10 @@ class KumoCloudAPI:
             raise KumoCloudConnectionError(
                 f"HTTP error during refresh: {err.status}"
             ) from err
+        except (aiohttp.ClientError, OSError) as err:
+            raise KumoCloudConnectionError(
+                f"Connection error during refresh: {err}"
+            ) from err
 
     async def _ensure_token_valid(self) -> None:
         """Ensure access token is valid, refresh if needed."""
@@ -186,7 +190,7 @@ class KumoCloudAPI:
                     continue
                 raise KumoCloudConnectionError("Request timeout") from err
             except ClientResponseError as err:
-                if err.status == 401:
+                if err.status in (401, 403):
                     raise KumoCloudAuthError("Authentication failed") from err
                 if err.status == 429 and attempt < max_retries:
                     delay = base_delay * (2 ** attempt)
@@ -199,6 +203,8 @@ class KumoCloudAPI:
                     await asyncio.sleep(delay)
                     continue
                 raise KumoCloudConnectionError(f"HTTP error: {err.status}") from err
+            except (aiohttp.ClientError, OSError) as err:
+                raise KumoCloudConnectionError(f"Connection error: {err}") from err
 
     async def get_account_info(self) -> dict[str, Any]:
         """Get account information."""
