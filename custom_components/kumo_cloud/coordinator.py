@@ -295,6 +295,11 @@ class KumoCloudDevice:
         adapter = self.zone_data.get("adapter", {})
         device_data = self.device_data
 
+        # Legacy adapters can report connected=False while cloud reads and
+        # commands work. Use successful polling rather than their IoT flag.
+        if adapter.get("isIoT") is False:
+            return bool(device_data) and self.coordinator.last_update_success
+
         # Check both adapter and device data for connection status
         adapter_connected = adapter.get("connected", False)
         device_connected = device_data.get("connected", adapter_connected)
