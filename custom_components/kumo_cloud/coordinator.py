@@ -3,6 +3,8 @@ from typing import Any
 import asyncio
 import logging
 
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.core import HomeAssistant
 
@@ -14,7 +16,13 @@ _LOGGER = logging.getLogger(__name__)
 class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Kumo Cloud data."""
 
-    def __init__(self, hass: HomeAssistant, api: KumoCloudAPI, site_id: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api: KumoCloudAPI,
+        site_id: str,
+        config_entry: ConfigEntry | None = None,
+    ) -> None:
         """Initialize the coordinator."""
         super().__init__(
             hass,
@@ -24,6 +32,7 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
         )
         self.api = api
         self.site_id = site_id
+        self.config_entry = config_entry
         self.zones: list[dict[str, Any]] = []
         self.devices: dict[str, dict[str, Any]] = {}
         self.device_profiles: dict[str, list[dict[str, Any]]] = {}
@@ -45,93 +54,146 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
             if cached_device_serial == device_serial:
                 device_detail[command] = command_value
 
+    def _persist_tokens(self) -> None:
+        """Persist rotated access and refresh tokens to the config entry."""
+        if self.config_entry is None:
+            return
+
+        updated_data = dict(self.config_entry.data)
+        needs_entry_update = False
+
+        if self.api.access_token and updated_data.get("access_token") != self.api.access_token:
+            updated_data["access_token"] = self.api.access_token
+            needs_entry_update = True
+
+        if self.api.refresh_token and updated_data.get("refresh_token") != self.api.refresh_token:
+            updated_data["refresh_token"] = self.api.refresh_token
+            needs_entry_update = True
+
+        if needs_entry_update:
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data=updated_data,
+            )
+
+    async def _refresh_access_token(self) -> None:
+        """Refresh the API token and persist any token rotation."""
+        await self.api.refresh_access_token()
+        self._persist_tokens()
+
+    async def _fetch_data(self) -> dict[str, Any]:
+        """Fetch data from Kumo Cloud."""
+        # Get zones for the site
+        zones = await self.api.get_zones(self.site_id)
+
+        # Get device details for each zone
+        devices = {}
+        device_profiles = {}
+        wireless_sensors = {}
+        device_statuses = {}
+        zone_notifications = {}
+
+        for zone in zones:
+            if "adapter" in zone and zone["adapter"]:
+                device_serial = zone["adapter"]["deviceSerial"]
+                zone_id = zone["id"]
+                has_sensor = zone["adapter"].get("hasSensor", False)
+
+                # Build task list - fetch everything in parallel
+                task_keys = ["detail", "profile", "status", "notifications"]
+                tasks = [
+                    self.api.get_device_details(device_serial),
+                    self.api.get_device_profile(device_serial),
+                    self.api.get_device_status(device_serial),
+                    self.api.get_zone_notification_preferences(zone_id),
+                ]
+                # Also fetch wireless sensor data if the zone has one
+                if has_sensor:
+                    task_keys.append("sensor")
+                    tasks.append(self.api.get_wireless_sensor(device_serial))
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Process results by key
+                result_map = {}
+                for key, result in zip(task_keys, results):
+                    if isinstance(result, KumoCloudAuthError):
+                        raise result
+                    if isinstance(result, Exception):
+                        _LOGGER.debug("Failed to fetch %s for %s: %s", key, device_serial, result)
+                        result_map[key] = None
+                    else:
+                        result_map[key] = result
+
+                device_detail = result_map.get("detail") or {}
+
+                # Process pending commands for the device
+                self._process_pending_commands(device_serial, device_detail)
+
+                devices[device_serial] = device_detail
+                device_profiles[device_serial] = result_map.get("profile") or []
+
+                if result_map.get("status"):
+                    device_statuses[device_serial] = result_map["status"]
+
+                if result_map.get("notifications"):
+                    zone_notifications[zone_id] = result_map["notifications"]
+
+                if has_sensor and result_map.get("sensor"):
+                    wireless_sensors[device_serial] = result_map["sensor"]
+
+        # Store the data for access by entities
+        self.zones = zones
+        self.devices = devices
+        self.device_profiles = device_profiles
+        self.wireless_sensors = wireless_sensors
+        self.device_statuses = device_statuses
+        self.zone_notifications = zone_notifications
+
+        return {
+            "zones": zones,
+            "devices": devices,
+            "device_profiles": device_profiles,
+            "wireless_sensors": wireless_sensors,
+            "device_statuses": device_statuses,
+            "zone_notifications": zone_notifications,
+        }
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Kumo Cloud."""
         try:
-            # Get zones for the site
-            zones = await self.api.get_zones(self.site_id)
-
-            # Get device details for each zone
-            devices = {}
-            device_profiles = {}
-            wireless_sensors = {}
-            device_statuses = {}
-            zone_notifications = {}
-
-            for zone in zones:
-                if "adapter" in zone and zone["adapter"]:
-                    device_serial = zone["adapter"]["deviceSerial"]
-                    zone_id = zone["id"]
-                    has_sensor = zone["adapter"].get("hasSensor", False)
-
-                    # Build task list - fetch everything in parallel
-                    task_keys = ["detail", "profile", "status", "notifications"]
-                    tasks = [
-                        self.api.get_device_details(device_serial),
-                        self.api.get_device_profile(device_serial),
-                        self.api.get_device_status(device_serial),
-                        self.api.get_zone_notification_preferences(zone_id),
-                    ]
-                    # Also fetch wireless sensor data if the zone has one
-                    if has_sensor:
-                        task_keys.append("sensor")
-                        tasks.append(self.api.get_wireless_sensor(device_serial))
-
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                    # Process results by key
-                    result_map = {}
-                    for key, result in zip(task_keys, results):
-                        if isinstance(result, Exception):
-                            _LOGGER.debug("Failed to fetch %s for %s: %s", key, device_serial, result)
-                            result_map[key] = None
-                        else:
-                            result_map[key] = result
-
-                    device_detail = result_map.get("detail") or {}
-
-                    # Process pending commands for the device
-                    self._process_pending_commands(device_serial, device_detail)
-
-                    devices[device_serial] = device_detail
-                    device_profiles[device_serial] = result_map.get("profile") or []
-
-                    if result_map.get("status"):
-                        device_statuses[device_serial] = result_map["status"]
-
-                    if result_map.get("notifications"):
-                        zone_notifications[zone_id] = result_map["notifications"]
-
-                    if has_sensor and result_map.get("sensor"):
-                        wireless_sensors[device_serial] = result_map["sensor"]
-
-            # Store the data for access by entities
-            self.zones = zones
-            self.devices = devices
-            self.device_profiles = device_profiles
-            self.wireless_sensors = wireless_sensors
-            self.device_statuses = device_statuses
-            self.zone_notifications = zone_notifications
-
-            return {
-                "zones": zones,
-                "devices": devices,
-                "device_profiles": device_profiles,
-                "wireless_sensors": wireless_sensors,
-                "device_statuses": device_statuses,
-                "zone_notifications": zone_notifications,
-            }
+            data = await self._fetch_data()
+            self._persist_tokens()
+            return data
 
         except KumoCloudAuthError as err:
-            # Try to refresh token once
             try:
-                await self.api.refresh_access_token()
-                # Retry the request
-                return await self._async_update_data()
+                await self._refresh_access_token()
             except KumoCloudAuthError as refresh_err:
-                raise UpdateFailed(
+                raise ConfigEntryAuthFailed(
                     f"Authentication failed: {refresh_err}"
                 ) from refresh_err
+            except KumoCloudConnectionError as refresh_err:
+                raise UpdateFailed(
+                    f"Error during token refresh: {refresh_err}"
+                ) from refresh_err
+            except Exception as refresh_err:
+                raise UpdateFailed(
+                    f"Unexpected error during token refresh: {refresh_err}"
+                ) from refresh_err
+
+            try:
+                data = await self._fetch_data()
+                self._persist_tokens()
+                return data
+            except KumoCloudAuthError as retry_err:
+                raise ConfigEntryAuthFailed(
+                    f"Authentication failed after token refresh: {retry_err}"
+                ) from retry_err
+            except KumoCloudConnectionError as retry_err:
+                raise UpdateFailed(f"Error communicating with API: {retry_err}") from retry_err
+            except Exception as retry_err:
+                raise UpdateFailed(f"Unexpected error: {retry_err}") from retry_err
         except KumoCloudConnectionError as err:
             raise UpdateFailed(f"Error communicating with API: {err}") from err
         except Exception as err:
@@ -142,6 +204,7 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             # Get fresh device details
             device_detail = await self.api.get_device_details(device_serial)
+            self._persist_tokens()
 
             # Process pending commands for the device
             self._process_pending_commands(device_serial, device_detail)
