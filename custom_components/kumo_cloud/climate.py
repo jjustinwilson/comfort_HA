@@ -98,10 +98,14 @@ def _c_to_f(celsius: float | None) -> float | None:
 def _f_to_c(fahrenheit: float | None) -> float | None:
     """Convert Fahrenheit to Celsius using Mitsubishi's lookup table.
 
-    Falls back to standard rounding for values outside the table.
+    Fractional inputs and values outside the table use standard conversion
+    rounded to the nearest supported half-degree Celsius step.
     """
     if fahrenheit is None:
         return None
+    if float(fahrenheit) != int(fahrenheit):
+        celsius = (fahrenheit - 32.0) * 5.0 / 9.0
+        return round(celsius * 2.0) / 2.0
     f_int = int(round(fahrenheit))
     if f_int in _F_TO_C:
         return _F_TO_C[f_int]
