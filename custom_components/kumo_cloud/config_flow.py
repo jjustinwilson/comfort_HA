@@ -142,7 +142,6 @@ class KumoCloudConfigFlow(ConfigFlow, domain=DOMAIN):
             title=f"Kumo Cloud - {selected_site['name']}",
             data={
                 CONF_USERNAME: self.data[CONF_USERNAME],
-                CONF_PASSWORD: self.data[CONF_PASSWORD],
                 CONF_SITE_ID: self.data[CONF_SITE_ID],
                 "access_token": self.api.access_token,
                 "refresh_token": self.api.refresh_token,
@@ -171,15 +170,15 @@ class KumoCloudConfigFlow(ConfigFlow, domain=DOMAIN):
                     {CONF_USERNAME: username, CONF_PASSWORD: user_input[CONF_PASSWORD]},
                 )
 
-                # Update the entry with new tokens
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data_updates={
-                        CONF_PASSWORD: user_input[CONF_PASSWORD],
-                        "access_token": info["api"].access_token,
-                        "refresh_token": info["api"].refresh_token,
-                    },
-                )
+                updated_data = {
+                    **entry.data,
+                    "access_token": info["api"].access_token,
+                    "refresh_token": info["api"].refresh_token,
+                }
+                updated_data.pop(CONF_PASSWORD, None)
+                self.hass.config_entries.async_update_entry(entry, data=updated_data)
+                await self.hass.config_entries.async_reload(entry.entry_id)
+                return self.async_abort(reason="reauth_successful")
 
             except KumoCloudAuthError:
                 errors["base"] = "invalid_auth"
