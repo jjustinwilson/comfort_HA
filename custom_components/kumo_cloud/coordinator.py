@@ -11,6 +11,20 @@ from .const import DOMAIN, DEFAULT_SCAN_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _parse_timestamp(timestamp: str | None) -> datetime | None:
+    """Parse a cloud/cache timestamp, interpreting missing offsets as UTC."""
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Kumo Cloud data."""
 
@@ -192,15 +206,19 @@ class KumoCloudDataUpdateCoordinator(DataUpdateCoordinator):
         self.cached_commands[(device_serial, command)] = (current_time, value)
         _LOGGER.debug("Cached command in device data: %s at %s", command, current_time)
 
-    def cull_cached_commands(self, device_serial: str, date: str) -> None:
+    def cull_cached_commands(self, device_serial: str, date: str | None) -> None:
         """Remove cached commands for a device where the date is on or after the item's timestamp."""
         to_remove = []
-        input_date = datetime.fromisoformat(date)
+        input_date = _parse_timestamp(date)
+        if input_date is None:
+            return
 
         for key, value in self.cached_commands.items():
             cached_device_serial, command = key
             cached_date, _ = value
-            cached_date_obj = datetime.fromisoformat(cached_date)
+            cached_date_obj = _parse_timestamp(cached_date)
+            if cached_date_obj is None:
+                continue
 
             # Check if the device_serial matches and the input date is on or after the cached date
             if cached_device_serial == device_serial and input_date >= cached_date_obj:
